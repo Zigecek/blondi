@@ -30,7 +30,9 @@ Thumbs.db
 
 # Build
 dist/
-build/
+build/_pyinstaller/
+build/_logs/
+# keep build/specs, build/runtime_hooks, build/*.bat, build/README.md
 
 # DB dumps
 *.sql.bak

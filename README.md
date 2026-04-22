@@ -307,6 +307,39 @@ c:\Users\zige\spot\
 
 ---
 
+## Pro vývojáře
+
+Aplikace má **dvě vrstvy developer dokumentace** pro ty, kdo ji chtějí upravovat
+nebo na ni nasadit AI agenta:
+
+- **[instructions.md](instructions.md)** — **normativní pravidla**:
+  architektonická rozhodnutí, explicitní zákazy (co se nesmí měnit v `autonomy/`
+  a `ocr/`), pravidla pro každý prompt AI agenta, upgrade path. Glosář pojmů
+  (waypoint, checkpoint, fiducial, run, ...).
+  **Pokud jsi AI agent pracující na této codebase, čti to jako první.**
+- **[instructions-reference.md](instructions-reference.md)** — **implementační
+  reference**: kompletní adresářový layout, DB schéma všech tabulek, API
+  signatury `autonomy`/`ocr` + additive modulů, 9 inline code samples pro
+  klíčové moduly (`OcrWorker`, `map_extracted` context manager, fiducial check,
+  return home, ...), implementační pořadí, styl kódu, postup pinutí verzí.
+- **[CHANGELOG.md](CHANGELOG.md)** — **historie verzí dokumentace**. Formát
+  Keep a Changelog + semver. Při jakékoli změně `instructions*.md` sem přidat
+  záznam.
+
+### Rozdělení rolí mezi dokumenty
+
+| Dokument | Pro koho | Obsah |
+|---|---|---|
+| `README.md` (tento) | operátor / onboarding | instalace, spuštění, **klávesy**, **troubleshooting**, **safety poznámky** |
+| `instructions.md` | AI agent / dev (normativ) | glosář, architektonická rozhodnutí, zákazy, pravidla pro prompt |
+| `instructions-reference.md` | AI agent / dev (detail) | API, DB schéma, code samples, implementační pořadí |
+
+**Pravidlo:** stejný obsah **nesmí být na dvou místech**. Pokud potřebuješ
+referenci, napiš jednořádkový odkaz ("viz [README sekce 9](README.md#9-ovládání-klávesnicí)"),
+ne copy-paste.
+
+---
+
 ## Licence
 
 Interní projekt. Autonomy a OCR projekty mají své vlastní licence — respektuj je.
