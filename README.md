@@ -38,7 +38,8 @@ dočasné `temp/` složky při extrahování map pro playback.
 ## 2. Požadavky
 
 - **Windows 10/11** (testováno na 11)
-- **Python 3.10 x64** (nutno doinstalovat, Boston Dynamics Spot SDK ho vyžaduje)
+- **Python 3.10.20 x64** (nutno doinstalovat, Boston Dynamics Spot SDK ho vyžaduje)
+<https://github.com/adang1345/PythonWindows/blob/master/3.10.20/python-3.10.20-amd64-full.exe>
 - **PostgreSQL 14+** lokálně nebo vzdáleně
 - **Boston Dynamics Spot** s aktivní GraphNav licencí
 - **AprilTag fiducial** na startu trasy (obvykle u nabíječky)

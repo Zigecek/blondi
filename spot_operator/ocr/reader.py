@@ -27,7 +27,7 @@ class FastPlateReader:
     Vrací (plate_text, text_confidence). Pokud chybí confidence API, vrátí None.
     """
 
-    def __init__(self, model_name: str = "european-plates-mobile-vit-v2"):
+    def __init__(self, model_name: str = "european-plates-mobile-vit-v2-model"):
         self._model_name = model_name
         self._reader: Any | None = None
         self._version: str = ""

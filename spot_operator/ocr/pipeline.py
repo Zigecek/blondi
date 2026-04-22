@@ -32,7 +32,7 @@ class OcrPipeline:
         self,
         *,
         yolo_model_path: Path,
-        text_engine: str = "european-plates-mobile-vit-v2",
+        text_engine: str = "european-plates-mobile-vit-v2-model",
         min_detection_confidence: float = 0.5,
     ):
         self._detector = YoloDetector(

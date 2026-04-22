@@ -68,9 +68,16 @@ class _ReturnHomeThread(QThread):
 class PlaybackRunPage(QWizardPage):
     """Autonomní run page: START, live view, progress, STOP s návratem, E-STOP."""
 
-    def __init__(self, config: AppConfig, parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        ocr_worker=None,  # noqa: ANN001 — OcrWorker; lazy typing
+        parent: Optional[QWidget] = None,
+    ):
         super().__init__(parent)
         self._config = config
+        self._ocr_worker = ocr_worker
         self._service: Optional[PlaybackService] = None
         self._meta: Optional[MapMetadata] = None
         self._run_thread: Optional[_RunThread] = None
@@ -80,6 +87,8 @@ class PlaybackRunPage(QWizardPage):
         self._live_view = None
         self._run_id: Optional[int] = None
         self._run_finished = False
+        # Udržuje stav zda jsme připojili OCR signály (abychom je nepropojili opakovaně).
+        self._ocr_signals_connected = False
 
         self.setTitle("5. Spuštění autonomní jízdy")
         self.setSubTitle("Klikni START. Jakmile průjezd skončí, přejdi na výsledek.")
@@ -177,6 +186,70 @@ class PlaybackRunPage(QWizardPage):
 
     def validatePage(self) -> bool:
         return self._run_finished
+
+    def cleanupPage(self) -> None:
+        """Návrat zpět (nebo safe_abort z wizardu) — uklidit všechny thready."""
+        self._teardown()
+
+    def _teardown(self) -> None:
+        """Bezpečně uklidí run thread, return home thread, image pipeline a
+        floating E-Stop widget. Idempotentní."""
+        # 1) Pokud běží autonomní run, požádej o přerušení a počkej.
+        if self._run_thread is not None and self._run_thread.isRunning():
+            try:
+                if self._service is not None:
+                    self._service.request_abort()
+            except Exception as exc:
+                _log.warning("request_abort during teardown failed: %s", exc)
+            try:
+                self._run_thread.wait(5000)
+            except Exception:
+                pass
+
+        # 2) Pokud běží return home, počkej delší chvíli (až 10 s).
+        if self._return_home_thread is not None and self._return_home_thread.isRunning():
+            try:
+                self._return_home_thread.wait(10000)
+            except Exception:
+                pass
+
+        # 3) Odpoj OCR signály aby po zavření stránky neběžely queued call-y.
+        if self._ocr_worker is not None and self._ocr_signals_connected:
+            try:
+                self._ocr_worker.photo_processed.disconnect(self._on_ocr_done)
+                self._ocr_worker.photo_failed.disconnect(self._on_ocr_failed)
+            except Exception:
+                pass
+            self._ocr_signals_connected = False
+
+        # 4) Zastav image pipeline.
+        if self._image_pipeline is not None:
+            try:
+                if hasattr(self._image_pipeline, "stop"):
+                    self._image_pipeline.stop()
+                self._image_pipeline.quit()
+                self._image_pipeline.wait(2000)
+            except Exception as exc:
+                _log.warning("ImagePipeline teardown failed: %s", exc)
+            self._image_pipeline = None
+
+        # 5) Skryj E-Stop widget.
+        if self._estop_widget is not None:
+            try:
+                self._estop_widget.hide()
+                self._estop_widget.deleteLater()
+            except Exception:
+                pass
+            self._estop_widget = None
+
+        # 6) Smaž temp extrahovanou mapu.
+        if self._service is not None:
+            try:
+                self._service.cleanup()
+            except Exception as exc:
+                _log.warning("PlaybackService.cleanup failed: %s", exc)
+
+        _log.info("PlaybackRunPage teardown complete")
 
     # ---- Slots ----
 
@@ -276,10 +349,45 @@ class PlaybackRunPage(QWizardPage):
             lambda reason: self._append_log(f"⚠ Chyba: {reason}")
         )
 
+        # Propojení OCR worker signálů — live feedback v log listu.
+        if self._ocr_worker is not None and not self._ocr_signals_connected:
+            self._ocr_worker.photo_processed.connect(self._on_ocr_done)
+            self._ocr_worker.photo_failed.connect(self._on_ocr_failed)
+            self._ocr_signals_connected = True
+
     def _on_progress(self, idx: int, total: int, name: str) -> None:
         self._progress.setRange(0, total)
         self._progress.setValue(idx)
         self._append_log(f"→ {idx}/{total}: {name}")
+
+    def _on_ocr_done(self, photo_id: int, count: int) -> None:
+        """OCR worker dokončil zpracování fotky. Zobraz přečtené SPZ.
+
+        POZN: signál přichází z worker threadu, Qt ho doručí queued do UI threadu.
+        Pokud stránka už není viditelná (wizard se zavřel), ignoruj.
+        """
+        if not self.isVisible():
+            return
+        if count == 0:
+            self._append_log(f"  (foto {photo_id}: SPZ nenalezena)")
+            return
+        # Načti přečtené SPZ texty z DB.
+        try:
+            from spot_operator.db.engine import Session
+            from spot_operator.db.repositories import detections_repo
+
+            with Session() as s:
+                detections = detections_repo.list_for_photo(s, photo_id)
+            plates = ", ".join(d.plate_text or "?" for d in detections) or "?"
+            self._append_log(f"  🔤 SPZ: {plates}")
+        except Exception as exc:
+            _log.warning("Could not load detections for photo %s: %s", photo_id, exc)
+            self._append_log(f"  🔤 SPZ: {count} detekce (načtení selhalo)")
+
+    def _on_ocr_failed(self, photo_id: int, reason: str) -> None:
+        if not self.isVisible():
+            return
+        self._append_log(f"  ⚠ OCR {photo_id} selhal: {reason}")
 
     def _ensure_live_view(self, bundle) -> None:
         if self._image_pipeline is not None:

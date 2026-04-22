@@ -19,7 +19,13 @@ from spot_operator.ui.wizards.pages.wifi_page import WifiPage
 class PlaybackWizard(SpotWizard):
     """QWizard pro spuštění playbacku existující mapy."""
 
-    def __init__(self, config: AppConfig, parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        ocr_worker=None,  # noqa: ANN001 — OcrWorker; lazy typing kvůli import cycle
+        parent: Optional[QWidget] = None,
+    ):
         super().__init__(config, window_title="Spuštění jízdy podle mapy", parent=parent)
 
         self.addPage(WifiPage(config, parent=self))
@@ -28,7 +34,9 @@ class PlaybackWizard(SpotWizard):
         # Fiducial s required_id=None; po výběru mapy ho MapSelectPage nastaví přes property.
         self._fiducial_page = FiducialPage(config, required_id=None, parent=self)
         self.addPage(self._fiducial_page)
-        self.addPage(PlaybackRunPage(config, parent=self))
+        # OCR worker předáváme do PlaybackRunPage, aby se jeho photo_processed
+        # signál zobrazoval v live logu.
+        self.addPage(PlaybackRunPage(config, ocr_worker=ocr_worker, parent=self))
         self.addPage(PlaybackResultPage(parent=self))
 
         self.currentIdChanged.connect(self._on_page_changed)

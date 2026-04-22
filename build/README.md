@@ -14,15 +14,24 @@ veškeré runtime patche jsou v `build/runtime_hooks/`.
 
 ## Rychlý start
 
-Z root projektu (`c:\Users\zige\spot`):
+Z root projektu (`c:\Users\zige\spot`) **dva kroky**:
 
+```bat
+setup_venv.bat                  REM jednorazovy setup venv + vsechny deps (root)
+build_all.bat             REM vlastni build
 ```
-build\build_all.bat
+
+Můžeš stavět i jednotlivě:
+
+```bat
+build_all.bat autonomy    REM jen autonomy.exe
+build_all.bat ocr         REM jen ocr.exe
+build_all.bat spot        REM jen spot.exe
 ```
 
 Výstupy:
 
-```
+```text
 dist\autonomy\autonomy.exe      (~180 MB)
 dist\ocr\ocr.exe                (~250 MB)
 dist\spot\spot.exe              (~450 MB)
@@ -30,24 +39,20 @@ dist\spot\spot.exe              (~450 MB)
 
 Každá `dist\<jmeno>\` složka je portable — zkopírujte ji na cílový stroj bez Pythonu.
 
+## Co dělá root `setup_venv.bat`
+
+1. Ověří Python 3.10 (py launcher).
+2. Vytvoří `.venv` v rootu (pokud ještě neexistuje).
+3. Nainstaluje `requirements.txt` + `nomeroff_net` (ocrtest.py) + `pyinstaller>=6.0` (bundler).
+
+Neřeší `autonomy\.venv` — ten je nezávislý pro dev práci na autonomy samotném
+a pro bundler se nepoužívá. Bundler vždy pracuje jen s root `.venv`.
+
 ## Předpoklady
 
-1. **Python 3.10** (vyžaduje bosdyn SDK) — použijte existující `setup_venv.bat` v root.
-2. Aktivovaný `.venv` s nainstalovanými:
-   - `requirements.txt` (root)
-   - `autonomy/requirements.txt` (PySide6 6.8.1 — je novější než root 6.6-6.7; pro spot.exe prefer root verzi)
-
-```
-setup_venv.bat
-call .venv\Scripts\activate.bat
-pip install -r requirements.txt
-pip install -r autonomy\requirements.txt
-pip install nomeroff_net
-pip install pyinstaller>=6.0
-```
-
-> **Pozn.**: `nomeroff_net` není v requirements.txt, ale `ocr/ocrtest.py` ho
-> importuje na module level. Bez něj nebude ocr.exe ani spot.exe buildit.
+- **Python 3.10** vedle Pythonu 3.12 (vyžaduje bosdyn SDK). Je-li potřeba nainstalovat,
+  `setup_venv.bat` hlásí instrukci.
+- Internet připojení při prvním setupu (pip install).
 
 ## Jak to funguje
 
@@ -69,11 +74,24 @@ lze monkey-patchovat modul-level konstanty bez zásahu do zdrojáků.
 
 ### Runtime data (portable mode)
 
-První spuštění každé `.exe` udělá **first-run kopii**:
-- `.env`, `.env.example` z bundlu vedle .exe — uživatel je může editovat.
-- OCR modely vedle .exe (pro ocr.exe a spot.exe).
+Data adresáře (`maps/`, `runs/`, `exports/`, `logs/`, `temp/`) se vytváří
+vedle .exe při startu (runtime hook přesměruje BASE_DIR).
 
-Druhé a další spuštění už soubory nepřepisuje.
+**`.env` se NEROZBALUJE vedle .exe.** Soubor zůstává uvnitř bundlu
+(`_internal/.env`), aplikace ho čte přímo odtud. Pokud chceš runtime override
+(jiné credentials, DB URL, model path bez rebuildu), vytvoř `.env` vedle .exe
+ručně — má prioritu nad bundled verzí.
+
+**OCR modely**:
+
+- **spot.exe**: model zůstává v bundlu, cesta přes env proměnnou `OCR_YOLO_MODEL`
+  (absolute path do `_internal/ocr/`). Nekopíruje se.
+- **ocr.exe**: model **se kopíruje** (first-run) vedle `ocr.exe`, protože
+  `ocrtest.py` má hardcoded relativní cesty (`./license-plate-finetune-v1m.pt`,
+  `./test/`). Neinvazivní patch přes env/sys.modules by vyžadoval víc než
+  monkey-patch CWD. Model je modelem (ne credentials), takže rozbalení tady
+  neznamená bezpečnostní problém. Uživatel dává vstupní `test/` složku vedle
+  ocr.exe.
 
 ### Ikony, data, test obrázky
 
@@ -95,7 +113,7 @@ Druhé a další spuštění už soubory nepřepisuje.
 
 ## Debugging build
 
-```
+```bat
 REM verbose output, necistit stare build artefakty
 pyinstaller --log-level=DEBUG --noconfirm ^
   --workpath build\_pyinstaller --distpath dist ^

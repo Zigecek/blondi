@@ -1,24 +1,43 @@
-PySide6>=6.6,<6.8
-SQLAlchemy>=2.0,<3.0
-alembic>=1.13,<2.0
-psycopg[binary]>=3.1,<4.0
-python-dotenv>=1.0
+# Pinnuté verze — snapshot úspěšné instalace 2026-04-22.
+# Postup aktualizace: instructions-reference.md sekce 7 "Jak pinout verze".
 
-bosdyn-client>=4.0
-bosdyn-core>=4.0
-bosdyn-api>=4.0
-bosdyn-mission>=4.0
+# --- GUI ---
+PySide6==6.7.3
 
-opencv-python>=4.9,<5.0
-numpy>=1.26,<2.0
-Pillow>=10.0
+# --- DB ---
+SQLAlchemy==2.0.49
+alembic==1.18.4
+psycopg[binary]==3.3.3
+python-dotenv==1.2.2
 
-ultralytics>=8.1,<9.0
-onnxruntime>=1.17,<2.0
-fast-plate-ocr>=1.0
+# --- Spot SDK (4.0.x → 5.1.4 po update) ---
+bosdyn-client==5.1.4
+bosdyn-core==5.1.4
+bosdyn-api==5.1.4
+bosdyn-mission==5.1.4
 
-keyring>=24.0
+# --- Image processing ---
+opencv-python==4.11.0.86
+numpy==1.26.4
+Pillow==12.2.0
 
-pytest>=8.0
-pytest-postgresql>=5.0
-pytest-qt>=4.4
+# --- OCR pipeline ---
+ultralytics==8.4.41
+onnxruntime==1.23.2
+fast-plate-ocr==1.1.0
+
+# --- OCR fallback engine (izolován do subprocessu, ale musí být v hlavním venv
+# aby ho import v subprocess wrapperu našel; technický dluh viz instructions.md
+# "POC known limitations" sekce "Nice to have") ---
+nomeroff_net==4.0.1
+
+# --- Credentials ---
+keyring==25.7.0
+
+# --- Bundler (dříve v setup_venv.bat; sjednocený source of truth) ---
+pyinstaller==6.19.0
+
+# --- Dev / testy ---
+pytest==9.0.3
+pytest-postgresql==8.0.0
+pytest-qt==4.5.0

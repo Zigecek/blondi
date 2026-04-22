@@ -1,5 +1,11 @@
 {
   "permissions": {
+    "allow": [
+      "Bash(\"c:/Users/zige/spot/.venv/Scripts/pip.exe\" freeze *)",
+      "Bash(\"c:/Users/zige/spot/.venv/Scripts/python.exe\" -m pytest \"c:/Users/zige/spot/tests/unit/test_pick_side_source.py\" \"c:/Users/zige/spot/tests/unit/test_waypoint_namer.py\" -v)",
+      "Bash(\"c:/Users/zige/spot/.venv/Scripts/python.exe\" -m pytest \"c:/Users/zige/spot/tests/integration/test_autonomy_smoke.py\" -v)",
+      "Bash(\"c:/Users/zige/spot/autonomy/.venv/Scripts/pip.exe\" show *)"
+    ],
     "additionalDirectories": [
       "C:\\Users\\zige\\.claude\\plans"
     ]

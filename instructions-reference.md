@@ -1,11 +1,11 @@
 ---
-version: 1.0.0
+version: 1.1.1
 last_updated: 2026-04-22
 next_review: 2026-07-22
 applies_to:
   python: "3.10"
-  bosdyn: "4.0.x"
-  pyside: "6.6+"
+  bosdyn: "5.1.x"
+  pyside: "6.7+"
   sqlalchemy: "2.0.x"
 document_role: reference
 ---
@@ -534,7 +534,7 @@ from pathlib import Path
 
 class OcrPipeline:
     def __init__(self, *, yolo_model_path: Path,
-                 text_engine: str = "european-plates-mobile-vit-v2",
+                 text_engine: str = "european-plates-mobile-vit-v2-model",
                  min_detection_confidence: float = 0.5):
         self._detector = YoloDetector(yolo_model_path, min_confidence=min_detection_confidence)
         self._reader = FastPlateReader(text_engine)

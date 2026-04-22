@@ -154,6 +154,10 @@ class TeleopRecordPage(QWizardPage):
             error_dialog(self, "Chyba", f"Nelze spustit nahrávání: {exc}")
             return
 
+        # Sdílíme service s následující SaveMapPage přes wizard property
+        # (místo křehkého iterování přes pageIds()).
+        wizard.setProperty("recording_service", self._service)
+
         self._ensure_image_pipeline(bundle)
         self._ensure_estop_widget(wizard, bundle)
         self._battery_timer.start()
@@ -161,10 +165,58 @@ class TeleopRecordPage(QWizardPage):
 
     def cleanupPage(self) -> None:
         """Qt volá při návratu zpět. Zde bychom měli být v safe state — neumožníme to."""
-        # RecordingWizard disable backButton, takže tohle by se nemělo spustit.
-        if self._service is not None:
-            self._service.abort()
-        self._battery_timer.stop()
+        # RecordingWizard disable backButton, takže tohle by se nemělo spustit
+        # uprostřed recordingu. Pokud se sem dostaneme (typicky zavření okna →
+        # safe_abort → naše explicitní volání), provedeme plný teardown.
+        self._teardown()
+
+    def _teardown(self) -> None:
+        """Bezpečně uklidí všechny thready a widgets.
+
+        Volat jde opakovaně (idempotentní) — `cleanupPage` + `closeEvent` by
+        mohly obě trigger nakonec stejnou cestu.
+        """
+        # 1) Zastav poll baterie.
+        try:
+            self._battery_timer.stop()
+        except Exception:
+            pass
+
+        # 2) Soft stop robot (velocity → 0). Při E-Stopu to neškodí.
+        bundle = self.wizard().bundle() if self.wizard() is not None else None
+        if bundle is not None and getattr(bundle, "move_dispatcher", None) is not None:
+            try:
+                bundle.move_dispatcher.send(0.0, 0.0, 0.0)
+            except Exception as exc:
+                _log.debug("move_dispatcher stop failed during teardown: %s", exc)
+
+        # 3) Zastav image pipeline (QThread).
+        if self._image_pipeline is not None:
+            try:
+                self._image_pipeline.stop() if hasattr(self._image_pipeline, "stop") else None
+                self._image_pipeline.quit()
+                self._image_pipeline.wait(2000)
+            except Exception as exc:
+                _log.warning("ImagePipeline teardown failed: %s", exc)
+            self._image_pipeline = None
+
+        # 4) Skryj floating E-Stop widget (zůstává v paměti, ale není visible).
+        if self._estop_widget is not None:
+            try:
+                self._estop_widget.hide()
+                self._estop_widget.deleteLater()
+            except Exception:
+                pass
+            self._estop_widget = None
+
+        # 5) Pokud recording stále běží (např. nečekané zavření), abortuj bez uložení.
+        if self._service is not None and self._service.is_recording:
+            try:
+                self._service.abort()
+            except Exception as exc:
+                _log.warning("RecordingService abort failed: %s", exc)
+
+        _log.info("TeleopRecordPage teardown complete")
 
     # ---- Keyboard teleop ----
 

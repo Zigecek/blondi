@@ -55,7 +55,7 @@ class AppConfig:
         )
         ocr_yolo_model_path = ROOT / ocr_yolo_model_rel
         ocr_text_engine = os.environ.get(
-            "OCR_TEXT_ENGINE", "european-plates-mobile-vit-v2"
+            "OCR_TEXT_ENGINE", "european-plates-mobile-vit-v2-model"
         )
         ocr_detection_min_confidence = float(
             os.environ.get("OCR_DETECTION_MIN_CONFIDENCE", "0.5")

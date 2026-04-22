@@ -160,6 +160,24 @@ class LoginPage(QWizardPage):
         self._progress.setVisible(False)
         self._connected = True
         self.wizard().set_bundle(bundle)  # type: ignore[attr-defined]
+
+        # Auto-detect dostupných image sources — některé Spoty advertise jen
+        # `frontleft_fisheye_image` / `frontright_fisheye_image` místo
+        # `left_fisheye_image` / `right_fisheye_image`. RecordingSidePage si
+        # pak vybere podle dostupnosti.
+        try:
+            from app.robot.images import ImagePoller
+
+            poller = ImagePoller(bundle.session)
+            sources = poller.list_sources()
+            self.wizard().setProperty("available_sources", list(sources))
+            _log.info("Spot advertise %d image sources: %s", len(sources), sources)
+        except Exception as exc:
+            _log.warning(
+                "Could not list image sources (wizard fallback to defaults): %s", exc
+            )
+            self.wizard().setProperty("available_sources", None)
+
         self._status.setText("<span style='color:#2e7d32;'>✓ Připojeno.</span>")
         self._maybe_save_profile()
         self.completeChanged.emit()

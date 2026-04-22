@@ -22,6 +22,27 @@ VALID_CAPTURE_SOURCES: tuple[str, ...] = (
     CAMERA_BACK,
 )
 
+# Kandidáti pro "levá strana Spota" od nejpreferovanějšího. Spot SDK / firmware
+# mezi verzemi mění jména (některé advertise `left_fisheye_image`, jiné
+# `frontleft_fisheye_image`). `pick_side_source` zkusí kandidáty po pořadí a
+# vrátí první, který je dostupný v `available`.
+PREFERRED_LEFT_CANDIDATES: tuple[str, ...] = (CAMERA_LEFT, CAMERA_FRONT_LEFT)
+PREFERRED_RIGHT_CANDIDATES: tuple[str, ...] = (CAMERA_RIGHT, CAMERA_FRONT_RIGHT)
+
+
+def pick_side_source(
+    available: list[str] | tuple[str, ...],
+    candidates: tuple[str, ...],
+) -> str | None:
+    """Vrátí první kandidát z `candidates`, který je v `available`.
+
+    Používané v `RecordingSidePage` pro adaptaci na konkrétní Spot robot.
+    """
+    for cand in candidates:
+        if cand in available:
+            return cand
+    return None
+
 # --- Aplikační adresáře (relativní k ROOT) ---
 LOGS_DIR: Path = ROOT / "logs"
 TEMP_ROOT: Path = ROOT / "temp"

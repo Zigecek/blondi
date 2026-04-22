@@ -166,15 +166,11 @@ class SaveMapPage(QWizardPage):
     def _start_save(self) -> None:
         if not self._is_name_valid():
             return
-        from spot_operator.ui.wizards.pages.teleop_record_page import TeleopRecordPage
 
-        # Najdi teleop page pro RecordingService
-        service: Optional[RecordingService] = None
-        for i in range(0, self.wizard().pageIds().__len__()):
-            page = self.wizard().page(i)
-            if isinstance(page, TeleopRecordPage):
-                service = page.recording_service
-                break
+        # RecordingService si TeleopRecordPage při svém initializePage uložila
+        # do wizard property "recording_service" — sdílený kanál místo
+        # iterování všech stránek (brittle při refaktoru pořadí).
+        service: Optional[RecordingService] = self.wizard().property("recording_service")
         if service is None or not service.is_recording:
             error_dialog(self, "Chyba", "Recording service není aktivní.")
             return

@@ -29,18 +29,27 @@ from spot_operator.logging_config import dump_environment_diagnostics, get_logge
 
 
 def _single_instance_lock(config: AppConfig):
-    """Zabrání spuštění druhé instance ve stejném user účtu."""
+    """Zabrání spuštění druhé instance **ve stejném Windows účtu**.
+
+    Druhý Windows user na stejném stroji (nebo sdíleném profilu) má vlastní
+    lock soubor a není blokovaný. Jméno souboru obsahuje `getpass.getuser()`
+    pro izolaci.
+    """
+    import getpass
+
     from PySide6.QtCore import QLockFile
 
-    from spot_operator.constants import LOCK_FILE_NAME
+    user = getpass.getuser() or "unknown"
+    # Sanitizuj user jméno pro filesystem (žádné \\, /, :, ...).
+    safe_user = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in user)
+    lock_path = config.temp_root / f"spot_operator_{safe_user}.lock"
 
-    lock_path = config.temp_root / LOCK_FILE_NAME
     lock = QLockFile(str(lock_path))
     lock.setStaleLockTime(10_000)  # 10 s — předchozí crash
     if not lock.tryLock(100):
         raise RuntimeError(
-            f"Another instance of Spot Operator is already running "
-            f"(lock file {lock_path})."
+            f"Another instance of Spot Operator is already running for user "
+            f"{user!r} (lock file {lock_path})."
         )
     return lock
 
@@ -118,7 +127,7 @@ def main() -> int:
     try:
         from spot_operator.ui.main_window import MainWindow
 
-        window = MainWindow(config)
+        window = MainWindow(config, ocr_worker=ocr_worker)
         window.show()
         exit_code = app.exec()
     finally:

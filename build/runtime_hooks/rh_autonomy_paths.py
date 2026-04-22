@@ -1,19 +1,19 @@
 """PyInstaller runtime hook — autonomy.exe path redirect.
 
-Spoustene PyInstaller bootloaderem PRED uzivatelskym kodem. Nemeni zdrojaky,
-jen monkey-patchuje modul-level konstanty v autonomy.app.config tak, aby
-BASE_DIR ukazoval vedle .exe (portable mod), nikoliv do _MEIPASS bundle.
+Spoustene PyInstaller bootloaderem PRED uzivatelskym kodem. Nemeni zdrojaky.
 
-Ucel:
-  - maps/, runs/, exports/, logs/ se vytvori vedle autonomy.exe
-  - .env a .env.example se pri prvnim spusteni zkopiruji z bundlu vedle .exe,
-    aby je uzivatel mohl editovat.
+Strategie:
+  - BASE_DIR pro runtime data (maps/, runs/, exports/, logs/) = slozka vedle
+    autonomy.exe (portable mod).
+  - .env a .env.example zustavaji UVNITR bundlu (_internal/.env), NEROZBALUJI
+    se vedle .exe. Monkey-patch _read_env_file provede fallback — pokud soubor
+    neni v BASE_DIR (exe_dir), zkusi meipass (bundle).
+  - Pokud uzivatel vytvori vlastni .env vedle .exe, ma prednost pred bundlem.
 """
 
 from __future__ import annotations
 
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -25,17 +25,6 @@ def _apply() -> None:
     exe_dir = Path(sys.executable).resolve().parent
     meipass = Path(getattr(sys, "_MEIPASS", exe_dir))
 
-    for fname in (".env", ".env.example"):
-        src = meipass / fname
-        dst = exe_dir / fname
-        if src.is_file() and not dst.exists():
-            try:
-                shutil.copy2(src, dst)
-            except OSError:
-                pass
-
-    # Pre-import app.config, patch BASE_DIR a derived cesty.
-    # Uzivatelsky main.py nasledne dostane patchovany modul ze sys.modules.
     try:
         import app.config as _cfg
     except Exception:
@@ -49,6 +38,20 @@ def _apply() -> None:
 
     for d in (_cfg.MAPS_DIR, _cfg.RUNS_DIR, _cfg.EXPORTS_DIR, _cfg.LOGS_DIR):
         d.mkdir(parents=True, exist_ok=True)
+
+    # _read_env_file fallback: pokud soubor neni v exe_dir, zkus meipass bundle.
+    _orig_read = _cfg._read_env_file
+
+    def _patched_read(path):
+        p = Path(path)
+        if p.is_file():
+            return _orig_read(p)
+        fallback = meipass / p.name
+        if fallback.is_file():
+            return _orig_read(fallback)
+        return {}
+
+    _cfg._read_env_file = _patched_read
 
     os.chdir(str(exe_dir))
 

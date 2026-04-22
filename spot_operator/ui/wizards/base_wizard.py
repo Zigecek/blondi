@@ -87,7 +87,23 @@ class SpotWizard(QWizard):
     # ---- Cleanup / close ----
 
     def safe_abort(self) -> None:
-        """Uvolní všechny prostředky. Voláno při zavření wizardu nebo chybě."""
+        """Uvolní všechny prostředky. Voláno při zavření wizardu nebo chybě.
+
+        Pořadí je důležité:
+          1. Teardown aktuální stránky (zastaví image pipeline, run threads,
+             skryje E-Stop widget, abortuje recording service). Qt nevolá
+             `cleanupPage` při `closeEvent`, proto to musíme zařídit sami.
+          2. Disconnect bundle (lease release, estop shutdown, SDK session).
+        """
+        # 1) Teardown aktuální stránky (pokud ho implementuje).
+        current = self.currentPage()
+        if current is not None and hasattr(current, "_teardown"):
+            try:
+                current._teardown()
+            except Exception as exc:
+                _log.exception("Page _teardown failed: %s", exc)
+
+        # 2) Disconnect bundle.
         if self._bundle is not None:
             try:
                 self._bundle.disconnect()

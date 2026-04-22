@@ -21,9 +21,12 @@ from spot_operator import __app_name__, __version__
 from spot_operator.config import AppConfig
 from spot_operator.db import ping as db_ping
 from spot_operator.logging_config import get_logger
+from spot_operator.services.map_storage import cleanup_temp_root
 from spot_operator.ui.common.dialogs import error_dialog
 from spot_operator.ui.wizards.playback_wizard import PlaybackWizard
 from spot_operator.ui.wizards.recording_wizard import RecordingWizard
+
+_TEMP_CLEANUP_INTERVAL_MS = 30 * 60 * 1000  # 30 minut
 
 _log = get_logger(__name__)
 
@@ -31,9 +34,16 @@ _log = get_logger(__name__)
 class MainWindow(QMainWindow):
     """Launcher se 3 akcemi: jízda, nahrávání, CRUD (pokud nainstalovaný)."""
 
-    def __init__(self, config: AppConfig, parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        ocr_worker=None,  # noqa: ANN001 — OcrWorker, lazy import kvůli cycle
+        parent: Optional[QWidget] = None,
+    ):
         super().__init__(parent)
         self._config = config
+        self._ocr_worker = ocr_worker
         self._recording_wizard: Optional[RecordingWizard] = None
         self._playback_wizard: Optional[PlaybackWizard] = None
         self._crud_window = None
@@ -97,6 +107,7 @@ class MainWindow(QMainWindow):
 
         self._register_crud_if_available()
         self._start_db_ping_timer()
+        self._start_temp_cleanup_timer()
 
     # ---- CRUD optional loader ----
 
@@ -132,7 +143,9 @@ class MainWindow(QMainWindow):
 
     def _start_playback(self) -> None:
         try:
-            wiz = PlaybackWizard(self._config, parent=self)
+            wiz = PlaybackWizard(
+                self._config, ocr_worker=self._ocr_worker, parent=self
+            )
             wiz.show()
             self._playback_wizard = wiz
         except Exception as exc:
@@ -147,6 +160,28 @@ class MainWindow(QMainWindow):
         self._db_timer.timeout.connect(self._update_db_status)
         self._db_timer.start()
         self._update_db_status()
+
+    # ---- Temp cleanup ----
+
+    def _start_temp_cleanup_timer(self) -> None:
+        self._temp_cleanup_timer = QTimer(self)
+        self._temp_cleanup_timer.setInterval(_TEMP_CLEANUP_INTERVAL_MS)
+        self._temp_cleanup_timer.timeout.connect(self._periodic_temp_cleanup)
+        self._temp_cleanup_timer.start()
+
+    def _periodic_temp_cleanup(self) -> None:
+        """Pravidelný úklid temp/ — jen pokud není aktivní wizard.
+
+        Během recordingu / playbacku čteme/píšeme do temp/, takže cleanup by
+        rozbil běžící operaci. Když ale žádný wizard neběží, bezpečně smažeme
+        pozůstatky po předchozích pádech.
+        """
+        if self._recording_wizard is not None or self._playback_wizard is not None:
+            return
+        try:
+            cleanup_temp_root(self._config.temp_root)
+        except Exception as exc:
+            _log.warning("Periodic temp cleanup failed: %s", exc)
 
     def _update_db_status(self) -> None:
         ok = db_ping()

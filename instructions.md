@@ -1,11 +1,11 @@
 ---
-version: 1.0.0
+version: 1.1.1
 last_updated: 2026-04-22
 next_review: 2026-07-22
 applies_to:
   python: "3.10"
-  bosdyn: "4.0.x"
-  pyside: "6.6+"
+  bosdyn: "5.1.x"
+  pyside: "6.7+"
   sqlalchemy: "2.0.x"
 document_role: core
 ---
@@ -202,6 +202,53 @@ Toto je **povinná** součást každého dokončeného úkolu.
 - API signatury, DB schéma, code samples → **jen `instructions-reference.md`**.
 
 Pokud se obsah rozvětvuje, napiš v druhém souboru **jednořádkový odkaz**, ne duplicitu.
+
+---
+
+## POC known limitations + roadmap na produkci
+
+Aplikace je ve stavu **POC**. Následující známá omezení jsou **přijatá** pro POC
+fázi a **musí být vyřešena před ostrým provozem**. Kategorie podle priority.
+
+### Kritická — před produkcí vyřešit
+
+- **Parallel OCR workers** — teď běží jeden worker. Při >30 fotek/min se fronta
+  kumuluje (fast-plate-ocr ~1-2 s/fotku na CPU). Kód (`claim_next_pending` s
+  `SKIP LOCKED`) paralelní workery podporuje — stačí z konfigurace spustit N.
+- **`ocr_status=failed` auto-retry** — teď zůstává v `failed` napořád, operátor
+  musí ručně v CRUD "Re-OCR". Přidat retry s exponential backoff a `max_retries`
+  v konfiguraci.
+- **Wi-Fi loss resume** — teď se běh ukončí jako `aborted`, mapa v DB zůstane
+  platná. Design pause+resume by perzistoval stav průběžně a po reconnect
+  pokračoval.
+- **CRUD autentizace** — aktuálně otevřené. V prod buď smazat celou složku
+  `spot_operator/ui/crud/` (design zámysl odstranitelnosti), nebo přidat
+  token-based / Windows-account auth.
+- **End-to-end OCR test** — teď jen normalizace. Přidat test s reálnou fotkou
+  z `ocr/test/` a ověřit, že pipeline vrací očekávanou SPZ s confidence > 0.7.
+
+### Důležitá — brzy po nasazení
+
+- **audit_log tabulka** — kdo/kdy vytvořil/smazal/upravil mapu, SPZ záznam, běh.
+- **Prometheus metriky OCR workeru** — počet zpracovaných fotek, latence,
+  úspěšnost detekce, queue depth.
+- **Retention CLI job** — `python -m spot_operator.services.retention
+  --older-than 90` pro mazání starých fotek.
+- **GPU akcelerace OCR** — auto-detekce `onnxruntime-gpu` provideru podle
+  dostupnosti NVIDIA CUDA.
+- **BYTEA archival** — partitioning `photos` po měsíci nebo S3 offload, až se
+  DB přiblíží 100 GB.
+
+### Nice to have
+
+- **Nomeroff separate venv** — teď `nomeroff_net` a `torch` bydlí v hlavním
+  venv (viz `requirements.txt`). Subprocess v `fallback.py` izoluje jen
+  paměť/GIL, ne závislosti. Řešení: `.venv_nomeroff` + `sys.executable` v
+  `fallback.py`.
+- **Keyring per-user upozornění** — UI v login kroku by mohlo upozornit
+  "credentials jsou viditelné jen pro tvůj Windows účet".
+- **Alembic granularita** — `0001_initial` je monolit. Budoucí revize **budou
+  additive** (nová tabulka, nový sloupec), ne editace existující.
 
 ---
 
