@@ -1,0 +1,250 @@
+"""Recording service — obaluje GraphNavRecorder z autonomy + waypoint namer + DB uložení.
+
+Flow:
+  1) start_recording() — spustí GraphNav recording.
+  2) add_unnamed_waypoint() — WP_NNN bez fotky.
+  3) capture_and_record_checkpoint(sources) — CP_NNN + capture fotek přes ImagePoller.
+  4) stop_and_archive_to_db(name, ...) — stáhne mapu, zazipuje, uloží do DB, smaže temp.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import tempfile
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+from spot_operator.constants import TEMP_ROOT
+from spot_operator.logging_config import get_logger
+from spot_operator.services.map_storage import save_map_to_db
+
+_log = get_logger(__name__)
+
+
+@dataclass
+class RecordedCheckpoint:
+    """Checkpoint přidaný během nahrávání."""
+
+    name: str
+    waypoint_id: str
+    kind: str  # 'waypoint' | 'checkpoint'
+    capture_sources: list[str] = field(default_factory=list)
+    photos: list[tuple[str, bytes, int, int]] = field(
+        default_factory=list, repr=False
+    )
+    note: str = ""
+    created_at: str = ""
+
+
+class RecordingService:
+    """Drží stav jednoho nahrávacího sezení.
+
+    Nepracuje přímo s DB za běhu — to až v `stop_and_archive_to_db()`. Důvod:
+    dokud operátor běh nedokončí, nechceme v DB částečná data.
+    """
+
+    def __init__(self, bundle: Any):
+        """
+        Args:
+            bundle: SpotBundle (session + managers) ze session_factory.connect().
+        """
+        self._bundle = bundle
+
+        from app.robot.graphnav_recording import GraphNavRecorder
+        from app.robot.waypoint_namer import WaypointNameGenerator
+
+        self._recorder = GraphNavRecorder(bundle.session)
+        self._namer = WaypointNameGenerator()
+        self._checkpoints: list[RecordedCheckpoint] = []
+        self._start_waypoint_id: Optional[str] = None
+        self._fiducial_id: Optional[int] = None
+        self._default_capture_sources: list[str] = []
+
+    @property
+    def checkpoint_count(self) -> int:
+        return sum(1 for c in self._checkpoints if c.kind == "checkpoint")
+
+    @property
+    def waypoint_count(self) -> int:
+        return len(self._checkpoints)
+
+    @property
+    def photo_count(self) -> int:
+        return sum(len(c.photos) for c in self._checkpoints)
+
+    @property
+    def start_waypoint_id(self) -> Optional[str]:
+        return self._start_waypoint_id
+
+    @property
+    def is_recording(self) -> bool:
+        return self._recorder.is_recording
+
+    def start(
+        self,
+        *,
+        map_name_prefix: str,
+        default_capture_sources: list[str],
+        fiducial_id: Optional[int],
+    ) -> None:
+        """Spustí GraphNav recording. Musí se volat jednou.
+
+        Args:
+            map_name_prefix: GraphNav prefix pro nahrávané waypointy.
+            default_capture_sources: strany focení zvolené operátorem.
+            fiducial_id: ID startovacího fiducialu (z fiducial_check).
+        """
+        if self._recorder.is_recording:
+            raise RuntimeError("Recording already in progress.")
+        self._default_capture_sources = list(default_capture_sources)
+        self._fiducial_id = fiducial_id
+        self._recorder.start_recording(
+            name_prefix=map_name_prefix,
+            session_name=f"spot_operator_{map_name_prefix}",
+        )
+
+    def add_unnamed_waypoint(self) -> RecordedCheckpoint:
+        """Přidá waypoint bez fotky (operátor klikne 'Waypoint')."""
+        name = self._namer.next_waypoint()
+        wp_id = self._recorder.create_waypoint(name)
+        if self._start_waypoint_id is None:
+            self._start_waypoint_id = wp_id
+        cp = RecordedCheckpoint(
+            name=name,
+            waypoint_id=wp_id,
+            kind="waypoint",
+            capture_sources=[],
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        self._checkpoints.append(cp)
+        _log.info("Waypoint added: %s id=%s", name, wp_id)
+        return cp
+
+    def capture_and_record_checkpoint(
+        self,
+        sources: list[str],
+        *,
+        image_poller: Any,
+        jpeg_quality: int = 85,
+    ) -> RecordedCheckpoint:
+        """Přidá pojmenovaný checkpoint a pořídí fotky.
+
+        Args:
+            sources: které image sources fotit (['left_fisheye_image', ...]).
+            image_poller: autonomy ImagePoller.
+        """
+        from spot_operator.robot.dual_side_capture import capture_sources as cap_sources
+        from spot_operator.services.photo_sink import encode_bgr_to_jpeg
+
+        name = self._namer.next_checkpoint()
+        wp_id = self._recorder.create_waypoint(name)
+        if self._start_waypoint_id is None:
+            self._start_waypoint_id = wp_id
+
+        frames = cap_sources(image_poller, sources)
+        photos: list[tuple[str, bytes, int, int]] = []
+        for src, bgr in frames.items():
+            try:
+                jpeg, w, h = encode_bgr_to_jpeg(bgr, quality=jpeg_quality)
+                photos.append((src, jpeg, w, h))
+            except Exception as exc:
+                _log.warning("Encode failed for source %s: %s", src, exc)
+
+        cp = RecordedCheckpoint(
+            name=name,
+            waypoint_id=wp_id,
+            kind="checkpoint",
+            capture_sources=sources,
+            photos=photos,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        self._checkpoints.append(cp)
+        _log.info(
+            "Checkpoint %s id=%s sources=%s photos=%d", name, wp_id, sources, len(photos)
+        )
+        return cp
+
+    def stop_and_archive_to_db(
+        self,
+        *,
+        map_name: str,
+        note: str,
+        operator_label: str | None,
+        end_fiducial_id: Optional[int],
+    ) -> int:
+        """Zastaví recording, stáhne GraphNav mapu, uloží ZIP + metadata do DB.
+
+        Args:
+            map_name: uživatelské jméno mapy (validace mimo).
+            note: poznámka.
+            operator_label: kdo nahrál (optional).
+            end_fiducial_id: ID fiducialu při ukončení (mělo by být == fiducial_id).
+
+        Returns:
+            map_id v DB.
+        """
+        if not self._recorder.is_recording:
+            raise RuntimeError("No recording in progress.")
+
+        TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+        tmp_root = Path(tempfile.mkdtemp(prefix="rec_", dir=str(TEMP_ROOT)))
+        try:
+            self._recorder.stop_recording()
+            self._recorder.download_map(tmp_root)
+            checkpoints_json = self._build_checkpoints_json(map_name)
+
+            map_id = save_map_to_db(
+                name=map_name,
+                source_dir=tmp_root,
+                fiducial_id=self._fiducial_id or end_fiducial_id,
+                start_waypoint_id=self._start_waypoint_id,
+                default_capture_sources=self._default_capture_sources,
+                checkpoints_json=checkpoints_json,
+                checkpoints_count=self.checkpoint_count,
+                note=note or None,
+                created_by_operator=operator_label or None,
+            )
+            return map_id
+        finally:
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+    def abort(self) -> None:
+        """Zruší běžící recording bez uložení. Volá se při chybě nebo zavření wizardu."""
+        if self._recorder.is_recording:
+            try:
+                self._recorder.stop_recording()
+            except Exception as exc:
+                _log.warning("stop_recording during abort failed: %s", exc)
+        self._checkpoints.clear()
+        self._start_waypoint_id = None
+
+    def _build_checkpoints_json(self, map_name: str) -> dict:
+        return {
+            "map_name": map_name,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "fiducial_id": self._fiducial_id,
+            "start_waypoint_id": self._start_waypoint_id,
+            "default_capture_sources": self._default_capture_sources,
+            "checkpoints": [
+                {
+                    "name": c.name,
+                    "waypoint_id": c.waypoint_id,
+                    "kind": c.kind,
+                    "capture_sources": c.capture_sources,
+                    "note": c.note,
+                    "created_at": c.created_at,
+                }
+                for c in self._checkpoints
+            ],
+        }
+
+    # Umožníme wizardu dostat se k seznamu checkpointů (pro counter, seznam).
+    @property
+    def checkpoints(self) -> list[RecordedCheckpoint]:
+        return list(self._checkpoints)
+
+
+__all__ = ["RecordingService", "RecordedCheckpoint"]

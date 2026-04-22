@@ -1,0 +1,36 @@
+# Venv
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# Logs
+logs/
+*.log
+
+# Temporary extracted maps
+temp/
+
+# IDE
+.vscode/
+.idea/
+
+# Env
+.env
+.env.local
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Build
+dist/
+build/
+
+# DB dumps
+*.sql.bak
