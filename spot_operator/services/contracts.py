@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Iterable, Sequence
 
 MAP_METADATA_SCHEMA_VERSION = 2
@@ -17,6 +18,38 @@ RETURN_HOME_STATUS_NOT_REQUESTED = "not_requested"
 RETURN_HOME_STATUS_IN_PROGRESS = "in_progress"
 RETURN_HOME_STATUS_COMPLETED = "completed"
 RETURN_HOME_STATUS_FAILED = "failed"
+
+
+class CaptureNote(str, Enum):
+    """Standardizované hodnoty pro ``RecordedCheckpoint.note`` a
+    ``checkpoints_json[*].note``. Enum dává strong typing místo magic strings.
+    """
+
+    OK = ""
+    CAPTURE_FAILED = "capture_failed"
+    CAPTURE_PARTIAL = "capture_partial"
+
+
+class CaptureFailedError(RuntimeError):
+    """Raise když všechny image sources u checkpointu selžou.
+
+    Operátor by měl dostat dialog s volbou retry / skip / abort. Recording
+    service **nesmí** rozhodovat sám (dřívější silent demotion na waypoint).
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        saved_sources: Sequence[str],
+        failed_sources: Sequence[str],
+    ):
+        self.name = name
+        self.saved_sources = tuple(saved_sources)
+        self.failed_sources = tuple(failed_sources)
+        super().__init__(
+            f"Capture failed for {name!r}: 0 saved, {len(self.failed_sources)} failed"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,6 +367,8 @@ __all__ = [
     "RETURN_HOME_STATUS_IN_PROGRESS",
     "RETURN_HOME_STATUS_COMPLETED",
     "RETURN_HOME_STATUS_FAILED",
+    "CaptureNote",
+    "CaptureFailedError",
     "MapCheckpoint",
     "MapPlan",
     "CaptureSummary",

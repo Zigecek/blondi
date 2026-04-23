@@ -34,7 +34,7 @@ from spot_operator.constants import (
     pick_side_source,
 )
 from spot_operator.logging_config import get_logger
-from spot_operator.services.contracts import validate_sources_known
+from spot_operator.services.contracts import CaptureFailedError, validate_sources_known
 from spot_operator.services.recording_service import RecordingService
 from spot_operator.ui.common.dialogs import confirm_dialog, error_dialog, info_dialog
 from spot_operator.ui.common.estop_floating import EstopFloating
@@ -116,21 +116,41 @@ class TeleopRecordPage(QWizardPage):
 
         side_layout.addSpacing(12)
 
+        # Foto tlačítka (V/N/B) jsou **disabled** dokud není 1. Waypoint (C).
+        # Důvod: pokud by operátor rovnou fotil bez Waypointu, start_waypoint_id
+        # by se svázal na první CP (mis-match s fiducial observací
+        # v mapě → playback se mis-localizuje → robot jede náhodně). Viz
+        # PR-02 FIND-072 (root cause hlášeného bugu).
         self._btn_photo_left = QPushButton("📷 Foto vlevo         (V)")
         self._btn_photo_left.clicked.connect(self._capture_left)
+        self._btn_photo_left.setEnabled(False)
         side_layout.addWidget(self._btn_photo_left)
 
         self._btn_photo_right = QPushButton("📷 Foto vpravo        (N)")
         self._btn_photo_right.clicked.connect(self._capture_right)
+        self._btn_photo_right.setEnabled(False)
         side_layout.addWidget(self._btn_photo_right)
 
         self._btn_photo_both = QPushButton("📷 Foto z obou stran  (B)")
         self._btn_photo_both.clicked.connect(self._capture_both)
+        self._btn_photo_both.setEnabled(False)
         side_layout.addWidget(self._btn_photo_both)
 
         self._btn_waypoint = QPushButton("📍 Waypoint           (C)")
         self._btn_waypoint.clicked.connect(self._add_waypoint)
         side_layout.addWidget(self._btn_waypoint)
+
+        self._start_hint = QLabel(
+            "<b>1) Stiskni 'Waypoint' (C) u startu (fiducial)</b><br>"
+            "<span style='color:#666;'>Foto tlačítka se odemknou po prvním "
+            "waypointu.</span>"
+        )
+        self._start_hint.setTextFormat(Qt.RichText)
+        self._start_hint.setWordWrap(True)
+        self._start_hint.setStyleSheet(
+            "background:#fff3e0; padding:6px; border:1px solid #ffb74d;"
+        )
+        side_layout.addWidget(self._start_hint)
 
         side_layout.addSpacing(12)
 
@@ -510,18 +530,17 @@ class TeleopRecordPage(QWizardPage):
             if poller is None:
                 poller = ImagePoller(bundle.session)
                 self._poller = poller
-            result = self._service.capture_and_record_checkpoint(
-                valid_sources, image_poller=poller
-            )
-            self._update_counter()
-            if result.capture_status == "failed":
-                error_dialog(
-                    self,
-                    "Focení selhalo",
-                    "Nepodařilo se uložit žádný snímek. Waypoint zůstal v mapě, "
-                    "ale nebyl zapsán jako checkpoint s fotkou.",
+            try:
+                result = self._service.capture_and_record_checkpoint(
+                    valid_sources, image_poller=poller
                 )
-            elif result.capture_status == "partial":
+            except CaptureFailedError as exc:
+                # Total capture failure — nabídnout retry / skip / cancel
+                # místo silent demotion na waypoint (PR-02 FIND-066/078).
+                self._handle_capture_failure(list(valid_sources), exc)
+                return
+            self._update_counter()
+            if result.capture_status == "partial":
                 info_dialog(
                     self,
                     "Dílčí focení",
@@ -531,12 +550,57 @@ class TeleopRecordPage(QWizardPage):
             _log.exception("Capture failed: %s", exc)
             error_dialog(self, "Chyba při focení", str(exc))
 
+    def _handle_capture_failure(
+        self, sources: list[str], exc: CaptureFailedError
+    ) -> None:
+        """Dialog retry / skip / cancel při totálním selhání capture.
+
+        Volba:
+        - Retry: zkusit znovu fotit stejnými sources.
+        - Skip: přidat explicit Waypoint (bez fotky) — bod zůstane v mapě.
+        - Cancel: nedělat nic (operátor se sám vrátí nebo projde dál).
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Focení selhalo")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(
+            f"U checkpointu {exc.name} se nepodařilo uložit žádný snímek "
+            f"({len(exc.failed_sources)}/{len(sources)} selhaly)."
+        )
+        box.setInformativeText(
+            "Co teď?\n\n"
+            "• Zkusit znovu — další pokus o capture stejných stran.\n"
+            "• Přeskočit — přidá explicit Waypoint (bez fotky).\n"
+            "• Zrušit — nedělá nic."
+        )
+        retry_btn = box.addButton("Zkusit znovu", QMessageBox.AcceptRole)
+        skip_btn = box.addButton("Přeskočit (Waypoint)", QMessageBox.DestructiveRole)
+        box.addButton("Zrušit", QMessageBox.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is retry_btn:
+            self._capture(sources)
+        elif clicked is skip_btn:
+            try:
+                self._service.add_unnamed_waypoint()
+                self._update_counter()
+            except Exception as exc2:
+                _log.exception("Skip-to-waypoint failed: %s", exc2)
+                error_dialog(self, "Chyba", str(exc2))
+        # Cancel → no-op
+
     def _add_waypoint(self) -> None:
         if self._service is None:
             return
         try:
             self._service.add_unnamed_waypoint()
             self._update_counter()
+            # Po prvním waypointu odemkni foto tlačítka + skryj hint.
+            if self._service.waypoint_count >= 1:
+                self._set_photo_buttons_enabled(True)
+                self._start_hint.setVisible(False)
         except Exception as exc:
             _log.exception("Add waypoint failed: %s", exc)
             error_dialog(self, "Chyba při přidávání waypointu", str(exc))
@@ -552,6 +616,16 @@ class TeleopRecordPage(QWizardPage):
 
     def _on_finish_clicked(self) -> None:
         if self._service is None or not self._service.is_recording:
+            return
+        # 0 waypointů = tvrdý blok (mapa by neměla start_waypoint_id,
+        # save_map_to_db by padl). Viz PR-02 FIND-144.
+        if self._service.waypoint_count == 0:
+            error_dialog(
+                self,
+                "Žádné waypointy",
+                "Mapa nemá žádný waypoint — nelze ji uložit. Stiskni Waypoint "
+                "(C) u startu u fiducialu, pak projdi trasu a přidej další body.",
+            )
             return
         if self._service.waypoint_count < 2:
             if not confirm_dialog(

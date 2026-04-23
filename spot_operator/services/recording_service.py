@@ -24,6 +24,8 @@ from spot_operator.services.contracts import (
     CAPTURE_STATUS_NOT_APPLICABLE,
     CAPTURE_STATUS_OK,
     CAPTURE_STATUS_PARTIAL,
+    CaptureFailedError,
+    CaptureNote,
     build_checkpoint_plan_payload,
 )
 from spot_operator.services.map_storage import save_map_to_db
@@ -102,6 +104,10 @@ class RecordingService:
     ) -> None:
         """Spustí GraphNav recording. Musí se volat jednou.
 
+        Start **vždy čistí předchozí stav** (``_checkpoints`` a
+        ``_start_waypoint_id``) — pokud by byla instance re-used po aborcích,
+        staré checkpointy by se jinak smíchaly s novými.
+
         Args:
             map_name_prefix: GraphNav prefix pro nahrávané waypointy.
             default_capture_sources: strany focení zvolené operátorem.
@@ -109,6 +115,9 @@ class RecordingService:
         """
         if self._recorder.is_recording:
             raise RuntimeError("Recording already in progress.")
+        # Reset state — v případě re-use instance po aborcích.
+        self._checkpoints.clear()
+        self._start_waypoint_id = None
         self._default_capture_sources = list(default_capture_sources)
         self._fiducial_id = fiducial_id
         self._recorder.start_recording(
@@ -116,12 +125,24 @@ class RecordingService:
             session_name=f"spot_operator_{map_name_prefix}",
         )
 
+    def _ensure_start_waypoint(self, wp_id: str) -> None:
+        """Nastaví ``_start_waypoint_id`` při prvním volání.
+
+        Volá se z ``add_unnamed_waypoint`` i ``capture_and_record_checkpoint``.
+        Pozor: pokud operátor zapomene kliknout 'Waypoint' (C) a rovnou
+        fotí (V/N/B), ``start_waypoint_id`` se bude rovnat prvnímu
+        checkpointu — což často způsobuje mis-localizaci playbacku.
+        TeleopRecordPage tento scénář blokuje (disable photo tlačítek
+        dokud neexistuje aspoň 1 waypoint).
+        """
+        if self._start_waypoint_id is None:
+            self._start_waypoint_id = wp_id
+
     def add_unnamed_waypoint(self) -> RecordedCheckpoint:
         """Přidá waypoint bez fotky (operátor klikne 'Waypoint')."""
         name = self._namer.next_waypoint()
         wp_id = self._recorder.create_waypoint(name)
-        if self._start_waypoint_id is None:
-            self._start_waypoint_id = wp_id
+        self._ensure_start_waypoint(wp_id)
         cp = RecordedCheckpoint(
             name=name,
             waypoint_id=wp_id,
@@ -142,6 +163,12 @@ class RecordingService:
     ) -> RecordedCheckpoint:
         """Přidá pojmenovaný checkpoint a pořídí fotky.
 
+        **Při totálním selhání capture** (žádná fotka) raise
+        :class:`CaptureFailedError` — volající (``TeleopRecordPage``)
+        rozhodne retry / skip / abort dialogem. Recording service
+        nebude silent-demotovat na waypoint (dřívější bug FIND-066/078,
+        kde operátor nevěděl, že checkpoint je prázdný).
+
         Args:
             sources: které image sources fotit (['left_fisheye_image', ...]).
             image_poller: autonomy ImagePoller.
@@ -151,8 +178,7 @@ class RecordingService:
 
         name = self._namer.next_checkpoint()
         wp_id = self._recorder.create_waypoint(name)
-        if self._start_waypoint_id is None:
-            self._start_waypoint_id = wp_id
+        self._ensure_start_waypoint(wp_id)
 
         frames = cap_sources(image_poller, sources)
         photos: list[tuple[str, bytes, int, int]] = []
@@ -171,22 +197,33 @@ class RecordingService:
                 _log.warning("Encode failed for source %s: %s", src, exc)
                 failed_sources.append(src)
 
-        kind = "checkpoint"
-        capture_status = CAPTURE_STATUS_OK
-        note = ""
         if not photos:
-            kind = "waypoint"
-            capture_status = CAPTURE_STATUS_FAILED
-            note = "capture_failed"
-        elif failed_sources:
+            # Totální selhání — raise místo silent demotion na waypoint.
+            # Waypoint již byl vytvořen v GraphNavu (create_waypoint výše),
+            # takže mapa má validní bod, jen bez fotky — volající rozhodne
+            # jestli přidat jako explicit waypoint (add_unnamed_waypoint),
+            # retry, nebo abort.
+            _log.warning(
+                "Capture failure pro %s: žádný source neuspěl (sources=%s, failed=%s)",
+                name, sources, failed_sources,
+            )
+            raise CaptureFailedError(
+                name=name,
+                saved_sources=[],
+                failed_sources=failed_sources or list(sources),
+            )
+
+        capture_status = CAPTURE_STATUS_OK
+        note: str = CaptureNote.OK.value
+        if failed_sources:
             capture_status = CAPTURE_STATUS_PARTIAL
-            note = "capture_partial"
+            note = CaptureNote.CAPTURE_PARTIAL.value
 
         cp = RecordedCheckpoint(
             name=name,
             waypoint_id=wp_id,
-            kind=kind,
-            capture_sources=sources,
+            kind="checkpoint",
+            capture_sources=list(sources),
             photos=photos,
             capture_status=capture_status,
             saved_sources=saved_sources,
@@ -300,12 +337,34 @@ class RecordingService:
             shutil.rmtree(tmp_root, ignore_errors=True)
 
     def abort(self) -> None:
-        """Zruší běžící recording bez uložení. Volá se při chybě nebo zavření wizardu."""
+        """Zruší běžící recording bez uložení. Volá se při chybě nebo zavření wizardu.
+
+        Pokud ``stop_recording`` selže, pokusí se jednou retry po 1 s delay —
+        bosdyn může mít internal state "recording active", který nechce
+        zůstat přes session boundary (další ``start_recording`` by padal
+        s "session already active"). Viz PR-02 FIND-085.
+        """
+        import time
+
         if self._recorder.is_recording:
             try:
                 self._recorder.stop_recording()
             except Exception as exc:
-                _log.warning("stop_recording during abort failed: %s", exc)
+                _log.warning(
+                    "stop_recording during abort failed: %s — zkouším retry po 1 s",
+                    exc,
+                )
+                time.sleep(1.0)
+                try:
+                    # Pokud bosdyn vidí recording stále active, zkus ještě jednou.
+                    if self._recorder.is_recording:
+                        self._recorder.stop_recording()
+                except Exception as exc2:
+                    _log.error(
+                        "stop_recording retry také selhal: %s — GraphNav internal "
+                        "state může zůstat \"recording\". Možná nutný reconnect.",
+                        exc2,
+                    )
         self._checkpoints.clear()
         self._start_waypoint_id = None
 
