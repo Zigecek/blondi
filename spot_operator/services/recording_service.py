@@ -302,7 +302,9 @@ class RecordingService:
             observed_fiducial_id: Optional[int] = None
             observed_list: list[int] = []
             try:
-                from app.robot.graphnav_recording import read_observed_fiducial_ids
+                from spot_operator.robot.graphnav_fiducial import (
+                    read_observed_fiducial_ids,
+                )
 
                 try:
                     observed_list = list(read_observed_fiducial_ids(tmp_root))

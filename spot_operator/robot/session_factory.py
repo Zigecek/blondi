@@ -150,14 +150,12 @@ def connect_partial(
     hostname: str,
     username: str,
     password: str,
-    *,
-    with_lease: bool = True,
-    with_estop: bool = True,
 ) -> SpotBundle:
     """Připojí se ke Spotu a postaví kompletní bundle manažerů.
 
     Nevyhazuje na dílčí chybu — vrací bundle s tím, co se podařilo. Volající
-    pozná chybějící klienty podle `None`.
+    pozná chybějící klienty podle `None`. PR-13 FIND-069: dead
+    flags ``with_lease`` / ``with_estop`` odstraněny (nikdy se nepoužívaly).
     """
     from app.robot.sdk_session import SpotSession
 
@@ -167,7 +165,7 @@ def connect_partial(
 
     bundle = SpotBundle(session=session)
 
-    if with_estop:
+    if True:  # E-Stop setup (zachováno jako bloky kvůli diffu).
         try:
             from app.robot.estop import EstopManager
             from app.robot.lease import LeaseManager
@@ -229,7 +227,7 @@ def connect_partial(
             _log.exception("Failed to start E-Stop manager: %s", exc)
 
     # Lease sekce: skip pokud už byl získán v E-Stop auto-recovery výše.
-    if with_lease and bundle.lease is None:
+    if bundle.lease is None:
         try:
             from app.robot.lease import LeaseManager
 
@@ -263,18 +261,9 @@ def connect(
     hostname: str,
     username: str,
     password: str,
-    *,
-    with_lease: bool = True,
-    with_estop: bool = True,
 ) -> SpotBundle:
     """Operator-facing connect: requires a fully initialized bundle."""
-    bundle = connect_partial(
-        hostname,
-        username,
-        password,
-        with_lease=with_lease,
-        with_estop=with_estop,
-    )
+    bundle = connect_partial(hostname, username, password)
     try:
         bundle.ensure_operator_ready()
     except Exception:
@@ -286,4 +275,4 @@ def connect(
     return bundle
 
 
-__all__ = ["SpotBundle", "connect", "connect_partial"]
+__all__ = ["SpotBundle", "BundleInfo", "connect", "connect_partial"]
