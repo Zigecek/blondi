@@ -293,6 +293,22 @@ def claim_next_pending(session: Session, worker_id: str) -> Photo | None:
     return photo
 
 
+def record_heartbeat(session: Session, photo_id: int, worker_id: str) -> None:
+    """Aktualizuje ``ocr_locked_at = now()`` pro photo, které daný worker claimnul.
+
+    Používá OCR worker periodicky (cca každých 60 s) během pipeline.process,
+    aby sweep_zombies nesekl běžící OCR → double processing (PR-06 FIND-026).
+    ``WHERE ocr_locked_by = :worker_id`` je bezpečnostní: update proběhne
+    pouze pokud je fotka stále claimovaná tímto workerem.
+    """
+    session.execute(
+        update(Photo)
+        .where(Photo.id == photo_id)
+        .where(Photo.ocr_locked_by == worker_id)
+        .values(ocr_locked_at=datetime.now(timezone.utc))
+    )
+
+
 def mark_done(session: Session, photo_id: int) -> None:
     session.execute(
         update(Photo)
@@ -412,6 +428,7 @@ __all__ = [
     "list_for_run_light",
     "get_last_photo_for_plate",
     "claim_next_pending",
+    "record_heartbeat",
     "mark_done",
     "mark_failed",
     "reset_to_pending",

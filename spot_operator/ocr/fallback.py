@@ -21,7 +21,7 @@ from spot_operator.ocr.dtos import BoundingBox, Detection
 
 _log = get_logger(__name__)
 
-_SUBPROCESS_TIMEOUT_SEC = 30
+_SUBPROCESS_TIMEOUT_SEC = 60
 
 
 _WRAPPER_CODE = """
@@ -61,8 +61,20 @@ def reprocess_bytes(
 
     Nomeroff nevrací text_confidence, ale detection_confidence v pipeline neposkytuje
     — vrátíme None pro obě a zapíšeme do DB s engine_name = 'yolo_v1m+nomeroff'.
+
+    PR-06 FIND-113: v PyInstaller-frozen buildu ``sys.executable`` ukazuje
+    na aplikační EXE, ne na Python interpreter — subprocess by pak spustil
+    celou aplikaci s ``-c ...``. V tom případě vrátíme prázdný výsledek
+    + error log (fallback OCR není v packed buildu podporován).
     """
     if not image_bytes:
+        return []
+
+    if getattr(sys, "frozen", False):
+        _log.error(
+            "Nomeroff fallback není podporován v PyInstaller-frozen buildu "
+            "(sys.executable ukazuje na aplikační EXE, ne na Python)."
+        )
         return []
 
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
@@ -125,9 +137,19 @@ def reprocess_bytes(
         return []
     finally:
         try:
-            temp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError as exc:
+            # PR-06 FIND-114: logujeme OSError místo silent swallow —
+            # na Windows může být soubor zamčený (permission / running
+            # antivirus scan) → disk fill při opakovaném re-OCR.
+            _log.warning(
+                "Failed to delete temp OCR file %s: %s", temp_path, exc
+            )
+        except Exception as exc:
+            _log.error(
+                "Unexpected error deleting temp OCR file %s: %s", temp_path, exc
+            )
 
 
 def _find_json_line(lines: list[str]) -> dict | None:

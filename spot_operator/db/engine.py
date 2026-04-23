@@ -94,6 +94,21 @@ def shutdown_engine() -> None:
             _log.info("DB engine disposed")
 
 
+def thread_local_session_remove() -> None:
+    """Odstraní thread-local session pro aktuální thread.
+
+    Worker threads by to měly volat v ``finally`` své ``run()`` metody,
+    aby se neudržovala zapleněná session po skončení threadu
+    (PR-07 FIND-015).
+    """
+    if _session_factory is None:
+        return
+    try:
+        _session_factory.remove()
+    except Exception as exc:
+        _log.debug("thread_local_session_remove failed: %s", exc)
+
+
 def _mask_url(url: str) -> str:
     """Vrátí DSN bez hesla pro logování."""
     try:

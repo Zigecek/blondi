@@ -48,7 +48,12 @@ class OcrPipeline:
             self._reader._ensure_loaded()  # type: ignore[attr-defined]
 
     def process(self, image_bytes: bytes) -> list[Detection]:
-        """Zpracuje jednu fotku → list detekcí SPZ."""
+        """Zpracuje jednu fotku → list detekcí SPZ.
+
+        PR-06 FIND-108: corrupted JPEG (cv2.imdecode vrátí None) teď
+        raise RuntimeError místo silent []. OCR worker to chytne a
+        mark_failed — uživatel vidí status, ne "done s 0 detekcí".
+        """
         if not image_bytes:
             _log.warning("OCR pipeline: called with empty image_bytes")
             return []
@@ -57,8 +62,10 @@ class OcrPipeline:
         arr = np.frombuffer(image_bytes, np.uint8)
         image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if image is None:
-            _log.warning("OCR pipeline: failed to decode image (%d bytes)", len(image_bytes))
-            return []
+            raise RuntimeError(
+                f"OCR pipeline: failed to decode image "
+                f"(size={len(image_bytes)} bytes — corrupted JPEG)."
+            )
 
         h, w = image.shape[:2]
         channels = image.shape[2] if image.ndim == 3 else 1

@@ -5,20 +5,39 @@ Funguje na ONNX runtime, žádný protobuf konflikt s bosdyn.
 
 from __future__ import annotations
 
+import re
+import threading
 from typing import Any
 
 import numpy as np
 
+from spot_operator.constants import PLATE_TEXT_REGEX
 from spot_operator.logging_config import get_logger
 
 _log = get_logger(__name__)
 
+_PLATE_RE = re.compile(PLATE_TEXT_REGEX)
+
 
 def _normalize_plate(text: str) -> str:
-    """Uppercase + odstraní mezery, pomlčky a neznámé znaky."""
+    """Uppercase + odstraní mezery, pomlčky a neznámé znaky + length check.
+
+    PR-06 FIND-112: Pokud výsledek neprojde ``PLATE_TEXT_REGEX`` (délka 1-16,
+    jen A-Z 0-9), vrátí prázdný string a loguje warning — OCR přečetlo
+    nesmyslný text a neměl by se ukládat do DB.
+    """
     if not text:
         return ""
-    return "".join(ch for ch in text.upper() if ch.isalnum())
+    alphanumeric = "".join(ch for ch in text.upper() if ch.isalnum())
+    if not alphanumeric:
+        return ""
+    if not _PLATE_RE.match(alphanumeric):
+        _log.warning(
+            "Normalized plate %r doesn't match PLATE_TEXT_REGEX; returning empty",
+            alphanumeric,
+        )
+        return ""
+    return alphanumeric
 
 
 class FastPlateReader:
@@ -31,6 +50,7 @@ class FastPlateReader:
         self._model_name = model_name
         self._reader: Any | None = None
         self._version: str = ""
+        self._load_lock = threading.Lock()
 
     @property
     def engine_version(self) -> str:
@@ -39,17 +59,20 @@ class FastPlateReader:
     def _ensure_loaded(self) -> Any:
         if self._reader is not None:
             return self._reader
-        from fast_plate_ocr import LicensePlateRecognizer  # lazy import
+        with self._load_lock:
+            if self._reader is not None:
+                return self._reader
+            from fast_plate_ocr import LicensePlateRecognizer  # lazy import
 
-        _log.info("Loading fast-plate-ocr model: %s", self._model_name)
-        self._reader = LicensePlateRecognizer(self._model_name)
-        try:
-            import fast_plate_ocr  # type: ignore
+            _log.info("Loading fast-plate-ocr model: %s", self._model_name)
+            self._reader = LicensePlateRecognizer(self._model_name)
+            try:
+                import fast_plate_ocr  # type: ignore
 
-            self._version = getattr(fast_plate_ocr, "__version__", "")
-        except Exception:
-            self._version = ""
-        return self._reader
+                self._version = getattr(fast_plate_ocr, "__version__", "")
+            except Exception:
+                self._version = ""
+            return self._reader
 
     def read(self, crop_bgr: np.ndarray) -> tuple[str, float | None]:
         """Přečte text z crop obrázku. Vrací (text, confidence_avg) nebo ("", None).
@@ -61,6 +84,9 @@ class FastPlateReader:
              Got: 3 Expected: 1``
         Proto konvertujeme vždy na grayscale. RGB fallback je pro případ,
         že budoucí model bude RGB variant.
+
+        PR-06 FIND-110: refactor z 3-level nested try/except na 2 úrovně
+        s extracted ``_try_run`` helperem.
         """
         reader = self._ensure_loaded()
         if crop_bgr.size == 0:
@@ -73,33 +99,22 @@ class FastPlateReader:
         _log.info("FastPlate read start: crop %dx%d", w, h)
 
         gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
-
         result: Any = None
         try:
-            try:
-                result = reader.run(gray, return_confidence=True)
-            except TypeError as exc:
-                _log.warning(
-                    "FastPlate grayscale TypeError (retry bez return_confidence): %s",
-                    exc,
-                )
-                result = reader.run(gray)
+            result = _try_run(reader, gray)
+        except (KeyboardInterrupt, MemoryError, SystemExit):
+            # Kritické exceptions propagujeme.
+            raise
         except Exception as exc:
-            # Model nepřijal grayscale — zkus RGB variant modelů.
             _log.warning(
                 "FastPlate grayscale run failed (%s); trying RGB fallback.",
                 exc,
             )
             rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
             try:
-                try:
-                    result = reader.run(rgb, return_confidence=True)
-                except TypeError as exc2:
-                    _log.warning(
-                        "FastPlate RGB TypeError (retry bez return_confidence): %s",
-                        exc2,
-                    )
-                    result = reader.run(rgb)
+                result = _try_run(reader, rgb)
+            except (KeyboardInterrupt, MemoryError, SystemExit):
+                raise
             except Exception:
                 _log.exception("FastPlate RGB fallback also failed; returning empty")
                 return "", None
@@ -118,6 +133,22 @@ class FastPlateReader:
                 result, text,
             )
         return normalized, conf
+
+
+def _try_run(reader: Any, image: np.ndarray) -> Any:
+    """Zavolá ``reader.run`` s ``return_confidence=True`` pokud to API
+    podporuje, jinak fallback bez tohoto kwargs.
+
+    Extrakce z ``FastPlateReader.read`` — odstraňuje nested try/except
+    (PR-06 FIND-110).
+    """
+    try:
+        return reader.run(image, return_confidence=True)
+    except TypeError as exc:
+        _log.warning(
+            "FastPlate run TypeError (retry bez return_confidence): %s", exc
+        )
+        return reader.run(image)
 
 
 def _unpack_result(result: Any) -> tuple[str, float | None]:

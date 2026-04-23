@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -18,26 +19,36 @@ class YoloDetector:
 
     Ultralytics model je thread-safe pro inference, ale inicializace je pomalá (~2s).
     Jednu instanci sdílíme napříč OCR workerem + CRUD re-runem.
+
+    PR-06 FIND-109: lazy load je thread-safe přes double-check locking.
+    Obvyklá cesta (``OcrPipeline.process`` s outer lock) to nepotřebuje,
+    ale kdyby někdo volal ``_ensure_loaded`` mimo pipeline lock, race je
+    ochráněný.
     """
 
     def __init__(self, model_path: Path, *, min_confidence: float = 0.5):
         self._model_path = model_path
         self._min_confidence = min_confidence
         self._model: Any | None = None
+        self._load_lock = threading.Lock()
 
     def _ensure_loaded(self) -> Any:
         if self._model is not None:
             return self._model
-        if not self._model_path.is_file():
-            raise FileNotFoundError(
-                f"YOLO model not found: {self._model_path}. "
-                "Zkontroluj OCR_YOLO_MODEL v .env."
-            )
-        from ultralytics import YOLO  # lazy import — těžká knihovna
+        with self._load_lock:
+            # Double-check uvnitř locku.
+            if self._model is not None:
+                return self._model
+            if not self._model_path.is_file():
+                raise FileNotFoundError(
+                    f"YOLO model not found: {self._model_path}. "
+                    "Zkontroluj OCR_YOLO_MODEL v .env."
+                )
+            from ultralytics import YOLO  # lazy import — těžká knihovna
 
-        _log.info("Loading YOLO model from %s", self._model_path)
-        self._model = YOLO(str(self._model_path))
-        return self._model
+            _log.info("Loading YOLO model from %s", self._model_path)
+            self._model = YOLO(str(self._model_path))
+            return self._model
 
     def detect(self, image_bgr: np.ndarray) -> list[tuple[BoundingBox, float]]:
         """Detekuje SPZ. Vrátí list (bbox, detection_confidence)."""

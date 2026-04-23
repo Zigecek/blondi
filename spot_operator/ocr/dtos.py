@@ -31,9 +31,16 @@ class Detection:
     engine_version: str = ""
 
     def to_db_row(self, photo_id: int) -> dict[str, Any]:
+        # PR-06 FIND-118: raise pokud plate je prázdný — signalizuje bug
+        # upstream. Pipeline filtruje prázdné texty před vytvořením Detection,
+        # takže sem by nikdy neměl přijít empty string.
+        if not self.plate:
+            raise ValueError(
+                "Detection.plate is empty — upstream filter nebyl aplikován."
+            )
         return {
             "photo_id": photo_id,
-            "plate_text": self.plate or None,
+            "plate_text": self.plate,
             "detection_confidence": self.detection_confidence,
             "text_confidence": self.text_confidence,
             "bbox": self.bbox.to_json(),
