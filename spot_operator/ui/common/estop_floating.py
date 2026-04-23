@@ -5,6 +5,11 @@ Od 1.2.1:
   - Toggle chování: klik v aktivním stavu = trigger, klik v triggered stavu = release.
   - Přijímá druhý callback `on_release` pro `EstopManager.release()`.
 
+Od 1.4 (PR-01 safety): ``on_release`` je **povinný** parametr. Dříve byl Optional a
+pokud chyběl, widget se jen vizuálně resetl do "klidného" stavu, ale robot byl
+fyzicky stále v E-Stop. Safety-critical lie — nyní konstruktor bez on_release
+hodí TypeError.
+
 Když operátor klikne E-Stop, motory Spota se okamžitě cut a widget se přepne
 do "AKTIVNÍ — klik uvolnit" stavu. Další klik zavolá release callback, widget
 se resetuje do výchozího červeného stavu.
@@ -13,7 +18,7 @@ se resetuje do výchozího červeného stavu.
 from __future__ import annotations
 
 import logging
-from typing import Callable, Optional
+from typing import Callable
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
@@ -65,8 +70,16 @@ class EstopFloating(QPushButton):
         self,
         parent: QWidget,
         on_trigger: Callable[[], None],
-        on_release: Optional[Callable[[], None]] = None,
+        on_release: Callable[[], None],
     ):
+        if on_trigger is None:
+            raise TypeError("EstopFloating: on_trigger je povinný callback.")
+        if on_release is None:
+            raise TypeError(
+                "EstopFloating: on_release je povinný callback. "
+                "Bez něj by klik v triggered stavu jen vizuálně resetoval widget, "
+                "ale robot by zůstal v E-Stop."
+            )
         super().__init__(_DEFAULT_ACTIVE_LABEL, parent)
         self._on_trigger = on_trigger
         self._on_release = on_release
@@ -126,16 +139,9 @@ class EstopFloating(QPushButton):
     def _do_release(self) -> None:
         """Uvolní E-Stop endpoint + resetuje widget.
 
-        Pokud `on_release` nebyl registrován (starší call path), jen resetuje
-        vizual — robot je ale pořád v E-Stop stavu z hardware pohledu. To je
-        problém; volající by měl vždy poskytnout on_release callback.
+        ``on_release`` je od PR-01 povinný parametr konstruktoru — tady
+        můžeme předpokládat, že není None.
         """
-        if self._on_release is None:
-            _log.warning(
-                "E-Stop release: no on_release callback registered; only visual reset."
-            )
-            self.reset()
-            return
         try:
             self._on_release()
         except Exception as exc:
@@ -166,6 +172,16 @@ class EstopFloating(QPushButton):
     @property
     def is_triggered(self) -> bool:
         return self._triggered
+
+    def closeEvent(self, event) -> None:  # noqa: D401, ANN001 - Qt event
+        """Při close widget odpoj eventFilter z parenta, aby nezůstal visící."""
+        parent = self.parentWidget()
+        if parent is not None:
+            try:
+                parent.removeEventFilter(self)
+            except Exception:
+                pass
+        super().closeEvent(event)
 
 
 __all__ = ["EstopFloating"]

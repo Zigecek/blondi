@@ -98,6 +98,8 @@ class SpotWizard(QWizard):
 
         Preferovaně deleguje na floating E-Stop widget aktuální stránky (ten
         zná svůj stav). Fallback: naše callbacks + bundle.estop přímo.
+        Pokud ani widget ani bundle.estop nejsou dostupné, loguje ERROR a
+        dává user-facing feedback (PR-01 FIND-134) — F1 nesmí být silent no-op.
         """
         current = self.currentPage()
         widget = getattr(current, "_estop_widget", None) if current is not None else None
@@ -121,6 +123,24 @@ class SpotWizard(QWizard):
                 bundle.estop.trigger()
             except Exception as exc:
                 _log.exception("EstopManager.trigger failed: %s", exc)
+            return
+
+        # Nikdo nepřijal — E-Stop není v tomto stavu dostupný. Nemůžeme
+        # silently ignorovat (safety-critical); zalogovat ERROR a zobrazit
+        # neblokující status bar hint / window title hint. Dialog by byl
+        # přes příliš — user prostě čekal E-Stop, musí vidět že nezabralo.
+        _log.error(
+            "E-Stop stisknut (F1), ale není dostupný — robot není připojen nebo "
+            "je v kroku bez E-Stop endpointu. Připojte se ke Spotovi a zkuste znovu."
+        )
+        try:
+            # Krátký vizuální hint přes window title flash.
+            original_title = self.windowTitle()
+            self.setWindowTitle(f"{original_title} — E-Stop není dostupný!")
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(2000, lambda: self.setWindowTitle(original_title))
+        except Exception:
+            pass
 
     # ---- Cleanup / close ----
 

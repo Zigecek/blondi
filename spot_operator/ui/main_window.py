@@ -56,6 +56,9 @@ class MainWindow(QMainWindow):
         self._walk_wizard: Optional[WalkWizard] = None
         self._crud_window = None
         self._bundle: Any | None = None
+        # Cleanup se musí zavolat jak při closeEvent, tak přes aboutToQuit
+        # (kill signál / OS shutdown). Idempotentní flag zabrání double-run.
+        self._cleanup_done: bool = False
 
         self.setWindowTitle(f"{__app_name__} {__version__}")
         self.resize(960, 640)
@@ -137,6 +140,14 @@ class MainWindow(QMainWindow):
         self._start_temp_cleanup_timer()
         self._update_spot_status()
         self._update_robot_controls()
+
+        # Registrovat emergency cleanup pro případ, že closeEvent nedorazí
+        # (OS kill signal, crash, app.quit volaný odjinud). Idempotent.
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._emergency_cleanup)
 
     # ---- Spot connection lifecycle ----
 
@@ -376,14 +387,40 @@ class MainWindow(QMainWindow):
     # ---- Close cleanup ----
 
     def closeEvent(self, event):  # noqa: D401 - Qt hook
-        """Při zavření hlavního okna disconnectujeme bundle (pokud existuje)."""
+        """Při zavření hlavního okna disconnectujeme bundle (pokud existuje).
+
+        Volá `_emergency_cleanup`, který je idempotentní — stejná funkce
+        běží i z `aboutToQuit` slotu pro případ kill signálu / crash.
+        """
+        self._emergency_cleanup()
+        super().closeEvent(event)
+
+    def _emergency_cleanup(self) -> None:
+        """Idempotentní teardown volaný z closeEvent i aboutToQuit.
+
+        Pořadí: zastav timery (aby po částečném teardownu nevyhazovaly
+        signály), pak disconnect bundle.
+        """
+        if self._cleanup_done:
+            return
+        self._cleanup_done = True
+
+        # Timery musí být stoppnuté PŘED disconnect bundle, aby timeouts
+        # nenakreslily něco do zničeného UI.
+        for timer_attr in ("_db_timer", "_temp_cleanup_timer"):
+            timer = getattr(self, timer_attr, None)
+            if timer is not None:
+                try:
+                    timer.stop()
+                except Exception as exc:
+                    _log.warning("Timer %s stop failed: %s", timer_attr, exc)
+
         if self._bundle is not None:
             try:
                 self._bundle.disconnect()
             except Exception as exc:
-                _log.warning("MainWindow close: bundle.disconnect failed: %s", exc)
+                _log.warning("MainWindow cleanup: bundle.disconnect failed: %s", exc)
             self._bundle = None
-        super().closeEvent(event)
 
     def _active_robot_wizard(self) -> QWidget | None:
         return (

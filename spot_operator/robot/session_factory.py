@@ -8,15 +8,44 @@ Používá existující třídy z autonomy — neduplikujeme jejich logiku.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
 
 from spot_operator.logging_config import get_logger
 
 _log = get_logger(__name__)
 
+# Timeouts pro jednotlivé disconnect kroky (s). Pokud RPC zavěsí na síti,
+# zabrání to UI zamrznutí na `closeEvent`.
+_DISCONNECT_STEP_TIMEOUT_S: float = 3.0
+# Max doba čekání na power_off completion před start E-Stop auto-recovery.
+_POWER_OFF_WAIT_S: float = 10.0
 
-@dataclass
+
+def _teardown_with_timeout(name: str, fn: Callable[[], None], timeout_s: float) -> None:
+    """Spustí ``fn()`` v pool threadu s timeoutem. Při timeoutu log + pokračuj.
+
+    Proč ne ``signal.alarm`` nebo ``threading.Timer``? Bosdyn RPC je ukryté
+    uvnitř C++ knihovny; není spolehlivý přerušovací signál. Pool thread
+    aspoň uvolní volající (UI thread) — visící worker bude garbage
+    collected při aplikačním exitu.
+    """
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"disconnect-{name}") as pool:
+        future = pool.submit(fn)
+        try:
+            future.result(timeout=timeout_s)
+        except FuturesTimeout:
+            _log.warning(
+                "Disconnect krok %r nedokončil za %.1f s — pokračuji, visící "
+                "operace se uklidí na exit aplikace.",
+                name, timeout_s,
+            )
+        except Exception as exc:
+            _log.warning("Disconnect krok %r selhal: %s", name, exc)
+
+
+@dataclass(slots=True)
 class SpotBundle:
     """Seskupení všech aktivních manažerů pro Spot robota.
 
@@ -53,28 +82,37 @@ class SpotBundle:
         )
 
     def disconnect(self) -> None:
-        """Uklidí všechny manažery v opačném pořadí než při connect."""
-        try:
-            if self.move_dispatcher is not None:
-                # autonomy `MoveCommandDispatcher` používá `.shutdown()` pro zastavení
-                # background threadu (žádná .stop() metoda — .stop() znamená 'zastav robota').
-                self.move_dispatcher.shutdown()  # type: ignore[attr-defined]
-        except Exception as exc:
-            _log.warning("move_dispatcher.shutdown failed: %s", exc)
-        try:
-            if self.lease is not None:
-                self.lease.release()  # type: ignore[attr-defined]
-        except Exception as exc:
-            _log.warning("lease.release failed: %s", exc)
-        try:
-            if self.estop is not None:
-                self.estop.shutdown()  # type: ignore[attr-defined]
-        except Exception as exc:
-            _log.warning("estop.shutdown failed: %s", exc)
-        try:
-            self.session.disconnect()  # type: ignore[attr-defined]
-        except Exception as exc:
-            _log.warning("session.disconnect failed: %s", exc)
+        """Uklidí všechny manažery v opačném pořadí než při connect.
+
+        Každý krok má samostatný timeout (``_DISCONNECT_STEP_TIMEOUT_S``) —
+        pokud bosdyn RPC zavěsí na odpojeném Wi-Fi, UI se neblokuje
+        donekonečna. Visící operace uklidí proces při exit.
+        """
+        if self.move_dispatcher is not None:
+            # autonomy `MoveCommandDispatcher` používá `.shutdown()` pro zastavení
+            # background threadu (žádná .stop() metoda — .stop() znamená 'zastav robota').
+            _teardown_with_timeout(
+                "move_dispatcher",
+                self.move_dispatcher.shutdown,  # type: ignore[attr-defined]
+                _DISCONNECT_STEP_TIMEOUT_S,
+            )
+        if self.lease is not None:
+            _teardown_with_timeout(
+                "lease.release",
+                self.lease.release,  # type: ignore[attr-defined]
+                _DISCONNECT_STEP_TIMEOUT_S,
+            )
+        if self.estop is not None:
+            _teardown_with_timeout(
+                "estop.shutdown",
+                self.estop.shutdown,  # type: ignore[attr-defined]
+                _DISCONNECT_STEP_TIMEOUT_S,
+            )
+        _teardown_with_timeout(
+            "session.disconnect",
+            self.session.disconnect,  # type: ignore[attr-defined]
+            _DISCONNECT_STEP_TIMEOUT_S,
+        )
 
 
 def connect_partial(
@@ -130,13 +168,26 @@ def connect_partial(
                     ) from exc
                 try:
                     PowerManager(session).power_off()
-                    _log.info("Motory vypnuty pro E-Stop auto-recovery")
+                    _log.info("Power-off RPC odeslán pro E-Stop auto-recovery")
                 except Exception as exc:
                     _log.exception("Auto-recovery power_off selhal: %s", exc)
                     raise RuntimeError(
                         "E-Stop setup selhal (motory on) a power_off taky selhal. "
                         "Restartuj Spota fyzicky."
                     ) from exc
+                # Bosdyn ``power_off`` je asynchronní — musíme počkat, až motory
+                # reálně vypnou, jinak další ``estop.start()`` spadne na další
+                # ``MotorsOnError``. Viz PR-01 FIND-062.
+                from spot_operator.robot.power_state import wait_until_powered_off
+
+                robot = getattr(session, "robot", None)
+                if robot is not None and not wait_until_powered_off(
+                    robot, max_wait_s=_POWER_OFF_WAIT_S
+                ):
+                    raise RuntimeError(
+                        "Power-off timeout — motory stále běží po "
+                        f"{_POWER_OFF_WAIT_S:.0f} s. E-Stop setup nelze dokončit."
+                    )
                 # Retry — motory jsou off.
                 estop = EstopManager(session)
                 estop.start()
