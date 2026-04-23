@@ -70,7 +70,10 @@ WIFI_PING_TIMEOUT_SEC: float = 3.0
 WIFI_TCP_PORT: int = 443
 
 # --- Playback ---
-PLAYBACK_NAV_TIMEOUT_SEC: float = 30.0
+# Navigation timeout per checkpoint — zvýšeno 30→60 s pro dlouhé trasy.
+# Při 0.5 m/s walk speed pokryje ~30 m segment. Kratší nechávalo robot timeout
+# u vzdálených checkpointů uprostřed cesty (ended with timeout on the robot).
+PLAYBACK_NAV_TIMEOUT_SEC: float = 60.0
 PLAYBACK_RETURN_HOME_TIMEOUT_SEC: float = 180.0
 PLAYBACK_LOW_BATTERY_PERCENT: int = 15
 

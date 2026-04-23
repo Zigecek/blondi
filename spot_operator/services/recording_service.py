@@ -201,16 +201,31 @@ class RecordingService:
             # jiný AprilTag než robot skutečně kotvil — playback pak selhává
             # se SPECIFIC_FIDUCIAL a robot se mis-lokalizuje.
             observed_fiducial_id: Optional[int] = None
+            observed_list: list[int] = []
             try:
                 from app.robot.graphnav_recording import read_observed_fiducial_ids
 
-                observed = read_observed_fiducial_ids(tmp_root)
-                if observed:
-                    observed_fiducial_id = observed[0]
+                observed_list = list(read_observed_fiducial_ids(tmp_root))
+                # KRITICKÉ pořadí volby fiducial_id pro playback-lokalizaci:
+                #   1) self._fiducial_id (UI fiducial_check PŘED start recording)
+                #      POKUD je taky v `observed_list` — user fyzicky ověřil,
+                #      že tento fiducial je vidět, a robot ho zaznamenal do mapy.
+                #      Nejjistější volba pro SPECIFIC_FIDUCIAL při playbacku.
+                #   2) end_fiducial_id (UI re-check v SaveMapPage) POKUD je
+                #      v observed_list.
+                #   3) První observed (sorted[0]) — obvykle nejnižší ID, nemusí
+                #      být ten který user verifikoval, ale alespoň je v mapě.
+                if self._fiducial_id is not None and self._fiducial_id in observed_list:
+                    observed_fiducial_id = self._fiducial_id
+                elif end_fiducial_id is not None and end_fiducial_id in observed_list:
+                    observed_fiducial_id = end_fiducial_id
+                elif observed_list:
+                    observed_fiducial_id = observed_list[0]
+
+                if observed_list:
                     _log.info(
-                        "Observed fiducial IDs in recorded map: %s (using %d)",
-                        observed,
-                        observed_fiducial_id,
+                        "Observed fiducial IDs in recorded map: %s (using %s)",
+                        observed_list, observed_fiducial_id,
                     )
                 else:
                     _log.warning(
@@ -220,7 +235,9 @@ class RecordingService:
             except Exception as exc:
                 _log.warning("read_observed_fiducial_ids failed: %s", exc)
 
-            # Priorita: 1) observed (z grafu), 2) start fiducial (UI check), 3) end fiducial (UI check).
+            # Priorita: 1) verified observed (z grafu + UI match),
+            #           2) start fiducial (UI check only — pokud snapshots nic nenašly),
+            #           3) end fiducial (UI check only).
             effective_fiducial_id = (
                 observed_fiducial_id or self._fiducial_id or end_fiducial_id
             )

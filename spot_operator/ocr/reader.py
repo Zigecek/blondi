@@ -52,21 +52,40 @@ class FastPlateReader:
         return self._reader
 
     def read(self, crop_bgr: np.ndarray) -> tuple[str, float | None]:
-        """Přečte text z crop obrázku. Vrací (text, confidence_avg) nebo ("", None)."""
+        """Přečte text z crop obrázku. Vrací (text, confidence_avg) nebo ("", None).
+
+        fast-plate-ocr modely (`european-plates-mobile-vit-v2-model` atd.)
+        očekávají 1-channel grayscale vstup. Pokud bychom poslali 3-channel
+        RGB/BGR, ONNX selže s:
+          ``InvalidArgument: Got invalid dimensions for input: index 3
+             Got: 3 Expected: 1``
+        Proto konvertujeme vždy na grayscale. RGB fallback je pro případ,
+        že budoucí model bude RGB variant.
+        """
         reader = self._ensure_loaded()
         if crop_bgr.size == 0:
             return "", None
 
-        # fast-plate-ocr očekává RGB nebo grayscale; BGR → RGB
         import cv2
 
-        rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+        gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
 
-        # API fast-plate-ocr se mezi verzemi trochu liší; zkusíme obojí.
         try:
-            result = reader.run(rgb, return_confidence=True)
-        except TypeError:
-            result = reader.run(rgb)
+            try:
+                result = reader.run(gray, return_confidence=True)
+            except TypeError:
+                result = reader.run(gray)
+        except Exception as exc:
+            # Model nepřijal grayscale — zkus RGB variant modelů.
+            _log.warning(
+                "fast_plate_ocr grayscale run failed (%s); trying RGB fallback.",
+                exc,
+            )
+            rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+            try:
+                result = reader.run(rgb, return_confidence=True)
+            except TypeError:
+                result = reader.run(rgb)
 
         text, conf = _unpack_result(result)
         return _normalize_plate(text), conf

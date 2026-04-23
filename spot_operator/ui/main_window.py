@@ -26,6 +26,7 @@ from spot_operator.services.map_storage import cleanup_temp_root
 from spot_operator.ui.common.dialogs import confirm_dialog, error_dialog
 from spot_operator.ui.wizards.playback_wizard import PlaybackWizard
 from spot_operator.ui.wizards.recording_wizard import RecordingWizard
+from spot_operator.ui.wizards.walk_wizard import WalkWizard
 
 _TEMP_CLEANUP_INTERVAL_MS = 30 * 60 * 1000  # 30 minut
 
@@ -52,6 +53,7 @@ class MainWindow(QMainWindow):
         self._ocr_worker = ocr_worker
         self._recording_wizard: Optional[RecordingWizard] = None
         self._playback_wizard: Optional[PlaybackWizard] = None
+        self._walk_wizard: Optional[WalkWizard] = None
         self._crud_window = None
         self._bundle: Any | None = None
 
@@ -111,13 +113,21 @@ class MainWindow(QMainWindow):
         )
         grid.addWidget(self._btn_rec, 1, 0)
 
+        self._btn_walk = self._make_big_button(
+            "🐕  Chůze se Spotem",
+            "Ovládej Spota klávesnicí bez nahrávání. Vyzkoušej fiducial + teleop.",
+            self._start_walk,
+            color="#6a1b9a",
+        )
+        grid.addWidget(self._btn_walk, 1, 1)
+
         self._btn_crud = self._make_big_button(
             "🛠  Správa SPZ a běhů",
             "CRUD nástroj pro development (volitelný).",
             self._open_crud,
             color="#455a64",
         )
-        grid.addWidget(self._btn_crud, 1, 1)
+        grid.addWidget(self._btn_crud, 2, 0, 1, 2)
 
         root.addLayout(grid)
         root.addStretch(1)
@@ -161,7 +171,11 @@ class MainWindow(QMainWindow):
     def _disconnect_spot(self) -> None:
         if self._bundle is None:
             return
-        if self._recording_wizard is not None or self._playback_wizard is not None:
+        if (
+            self._recording_wizard is not None
+            or self._playback_wizard is not None
+            or self._walk_wizard is not None
+        ):
             error_dialog(
                 self,
                 "Wizard běží",
@@ -261,6 +275,18 @@ class MainWindow(QMainWindow):
             _log.exception("Failed to open PlaybackWizard: %s", exc)
             error_dialog(self, "Chyba", str(exc))
 
+    def _start_walk(self) -> None:
+        if not self._ensure_bundle():
+            return
+        try:
+            wiz = WalkWizard(self._config, parent=self, bundle=self._bundle)
+            wiz.finished.connect(self._on_wizard_closed)
+            wiz.showMaximized()
+            self._walk_wizard = wiz
+        except Exception as exc:
+            _log.exception("Failed to open WalkWizard: %s", exc)
+            error_dialog(self, "Chyba", str(exc))
+
     def _on_wizard_closed(self, _result: int) -> None:
         """Po zavření wizardu vynuluj referenci. Bundle zůstává v MainWindow."""
         sender = self.sender()
@@ -268,6 +294,8 @@ class MainWindow(QMainWindow):
             self._recording_wizard = None
         elif sender is self._playback_wizard:
             self._playback_wizard = None
+        elif sender is self._walk_wizard:
+            self._walk_wizard = None
         # Refresh status — pro případ že by wizard nakonec bundle zničil
         # (by shouldn't, ale bezpečnost > performance).
         if self._bundle is not None:
@@ -307,7 +335,11 @@ class MainWindow(QMainWindow):
         rozbil běžící operaci. Když ale žádný wizard neběží, bezpečně smažeme
         pozůstatky po předchozích pádech.
         """
-        if self._recording_wizard is not None or self._playback_wizard is not None:
+        if (
+            self._recording_wizard is not None
+            or self._playback_wizard is not None
+            or self._walk_wizard is not None
+        ):
             return
         try:
             cleanup_temp_root(self._config.temp_root)

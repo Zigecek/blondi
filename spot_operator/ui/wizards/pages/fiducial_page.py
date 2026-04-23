@@ -242,7 +242,35 @@ class FiducialPage(QWizardPage):
             return
         self._ensure_image_pipeline(bundle)
         self._ensure_estop_widget(bundle)
+        # Detekce: pokud jsou motory už zapnuté (Spot už stál od minula /
+        # sdílený bundle z MainWindow), skipni "Zapnout a postavit" krok.
+        self._detect_and_mark_already_on(bundle)
         self.setFocus()
+
+    def _detect_and_mark_already_on(self, bundle) -> None:
+        """Jestli je robot už powered-on, nastav UI do stavu "hotovo" bez
+        čekání na click tlačítka. Stand command je idempotentní — pokud
+        user přesto chce "znovu postavit", tlačítko zůstává klikatelné.
+        """
+        from spot_operator.robot.power_state import is_motors_powered
+
+        if not is_motors_powered(bundle):
+            return
+        _log.info("Spot motors already powered on — skipping power-on click.")
+        self._spot_powered_on = True
+        self._btn_power.setText("▶ Znovu postavit Spota")
+        self._power_state_label.setText(
+            "<span style='color:#2e7d32;'>● Spot už stojí — WASD je aktivní.</span>"
+        )
+        self._power_status.setText(
+            "<i>(Motory byly zapnuté od předchozí relace.)</i>"
+        )
+        self._teleop_hint.setText(
+            "<i>Stiskni WASD / QE pro pohyb, Space pro stop.</i>"
+        )
+        self._teleop_hint.setStyleSheet("color:#2e7d32;")
+        if not self._velocity_timer.isActive():
+            self._velocity_timer.start()
 
     def cleanupPage(self) -> None:
         self._teardown()

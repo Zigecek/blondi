@@ -15,6 +15,22 @@ _LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 _LOG_BACKUP_COUNT = 5
 
 
+class _UndistortionNoiseFilter(logging.Filter):
+    """Tichý filter pro opakující se WARN 'Cannot build undistortion for X: k1'
+    z autonomy ImagePoller. Není to funkční vada — pipeline pokračuje bez
+    undistortion — ale spamuje log při každém startu image pipeline (2× per
+    wizard × 2 kamery). Zbytek warningů z ``app.robot.images`` zůstává
+    viditelný (např. skutečné capture erroru)."""
+
+    _MSG_SUBSTRING = "Cannot build undistortion"
+
+    def filter(self, record: logging.LogRecord) -> bool:  # True = nechat
+        try:
+            return self._MSG_SUBSTRING not in record.getMessage()
+        except Exception:
+            return True
+
+
 def setup(config: AppConfig) -> None:
     """Nainicializuje root logger. Volá se jednou při startu aplikace."""
     config.ensure_runtime_dirs()
@@ -46,6 +62,10 @@ def setup(config: AppConfig) -> None:
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("bosdyn").setLevel(logging.INFO)
     logging.getLogger("ultralytics").setLevel(logging.WARNING)
+
+    # Potlač opakovaný WARN z autonomy ImagePoller undistortion setupu —
+    # autonomy nemůžeme editovat (rule additive), takže aplikujeme filter.
+    logging.getLogger("app.robot.images").addFilter(_UndistortionNoiseFilter())
 
     _install_qt_handler()
 

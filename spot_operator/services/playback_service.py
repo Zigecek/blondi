@@ -149,6 +149,28 @@ class PlaybackService(QObject):
                 "a zkus playback znovu."
             )
 
+        # Diagnostika před spuštěním: kde si robot myslí že je, a v jakém
+        # pořadí budeme navštěvovat checkpointy. Když user hlásí "robot jede
+        # na nejvzdálenější místo", tohle ukáže co skutečně GraphNav vidí.
+        localized_wp = self._current_localization_waypoint()
+        expected_start = meta.start_waypoint_id or "(neznámý)"
+        _log.info(
+            "Playback start — localized waypoint: %s, expected start_waypoint_id: %s",
+            localized_wp or "(neznámý)", expected_start,
+        )
+        if localized_wp and expected_start != "(neznámý)" and localized_wp != expected_start:
+            _log.warning(
+                "Mis-localization suspicion: robot je lokalizovaný na %s, "
+                "ale start mapy je %s. Pokud trasa jede divným směrem, "
+                "přibliž Spota k fiducialu a zkus znovu.",
+                localized_wp, expected_start,
+            )
+        _log.info(
+            "Checkpoint order (%d): %s",
+            len(checkpoints),
+            ", ".join(f"{c.name}->{c.waypoint_id[:12]}..." for c in checkpoints),
+        )
+
         run_code = runs_repo.generate_run_code()
         with Session() as s:
             run = runs_repo.create(
@@ -185,6 +207,7 @@ class PlaybackService(QObject):
         success = 0
         total = len(checkpoints)
         abort_reason: Optional[str] = None
+        consecutive_nav_fails = 0
 
         for idx, cp in enumerate(checkpoints, start=1):
             if self._abort_requested:
@@ -195,15 +218,25 @@ class PlaybackService(QObject):
                 self._emit_progress(f"Navigate to {cp.name} ({idx}/{total})")
                 result = self._navigate_with_retry(cp)
                 if not result.ok:
+                    consecutive_nav_fails += 1
                     abort_reason = f"navigate failed at {cp.name}: {result.message}"
                     _log.warning(abort_reason)
-                    # Pokud robot ztratil lokalizaci i po retry, nemá smysl
-                    # pokračovat dalším checkpointem — GraphNav bude stále
-                    # mis-localized a jet špatným směrem.
-                    if result.is_localization_loss:
+                    # Po 3 po sobě jdoucích selháních navigace ukonči run —
+                    # robot je pravděpodobně mis-localized nebo má fyzickou
+                    # překážku, další checkpointy budou taky fail.
+                    if consecutive_nav_fails >= 3:
                         _log.error(
-                            "Aborting run — robot lost localization and "
-                            "could not recover. Další checkpointy nebudou pokoušeny."
+                            "Aborting run — %d po sobě jdoucích selhání navigace. "
+                            "Robot je pravděpodobně mis-localized nebo má překážku.",
+                            consecutive_nav_fails,
+                        )
+                        break
+                    # Pokud byl retry vyčerpán i po re-localize (LOST/TIMEOUT),
+                    # nemá smysl pokračovat — robot je v nefunkčním stavu.
+                    if self._should_retry_outcome(result):
+                        _log.error(
+                            "Aborting run — re-localize nepomohl, robot nemůže "
+                            "pokračovat (%s).", result.outcome.value,
                         )
                         break
                     continue
@@ -212,6 +245,7 @@ class PlaybackService(QObject):
                     self._capture_at_checkpoint(cp)
 
                 success += 1
+                consecutive_nav_fails = 0
                 with Session() as s:
                     runs_repo.mark_progress(s, self._run_id, success)
                     s.commit()
@@ -263,8 +297,22 @@ class PlaybackService(QObject):
 
     # ---- Internal helpers ----
 
+    def _should_retry_outcome(self, result) -> bool:  # noqa: ANN001 — NavigationResult
+        """Rozšíření ``result.is_localization_loss`` o TIMEOUT.
+
+        Autonomy definuje ``is_localization_loss`` jen pro LOST/NOT_LOCALIZED.
+        Ale TIMEOUT typicky znamená, že robot je mis-localized (nehýbe se ke
+        špatné cílové pozici a 30 s okno vyprší). Po re-localize má velkou
+        šanci uspět, takže retry-ujeme stejně.
+        """
+        from app.models import NavigationOutcome
+
+        if result.is_localization_loss:
+            return True
+        return result.outcome == NavigationOutcome.TIMEOUT
+
     def _navigate_with_retry(self, cp: "CheckpointRef", max_retries: int = 2):
-        """Wrapper kolem `navigator.navigate_to` s re-localize při LOST.
+        """Wrapper kolem `navigator.navigate_to` s re-localize při LOST/TIMEOUT.
 
         Autonomy má podobnou logiku v `_NavigationWorker._navigate_with_retry`.
         Bez ní při první ztrátě lokalizace v playbacku robot jen pokračuje
@@ -277,10 +325,19 @@ class PlaybackService(QObject):
                 cp.waypoint_id, timeout=PLAYBACK_NAV_TIMEOUT_SEC
             )
             last_result = result
+            # Diagnostický log: kde robot skončil po navigate_to volání.
+            # Při bugu "jede na nejvzdálenější místo" tohle ukáže, kam to
+            # GraphNav reálně odvezlo.
+            post_wp = self._current_localization_waypoint()
+            _log.info(
+                "Navigate to %s (target=%s...) → outcome=%s, robot now at waypoint %s",
+                cp.name, cp.waypoint_id[:12],
+                result.outcome.value, post_wp[:12] if post_wp else "(neznámý)",
+            )
             if result.ok:
                 return result
-            if not result.is_localization_loss:
-                # Ne lokalizační problem — retry nemá smysl.
+            if not self._should_retry_outcome(result):
+                # Ne lokalizační / timeout problem — retry nemá smysl.
                 return result
             attempt += 1
             if attempt > max_retries:
@@ -293,7 +350,8 @@ class PlaybackService(QObject):
                 max_retries,
             )
             self._emit_progress(
-                f"Ztracená lokalizace — re-localize (retry {attempt}/{max_retries})"
+                f"{cp.name}: {result.outcome.value} — re-localize + retry "
+                f"{attempt}/{max_retries}"
             )
             try:
                 if not self._navigator.relocalize_nearest_fiducial():
@@ -301,6 +359,18 @@ class PlaybackService(QObject):
             except Exception as exc:
                 _log.warning("Re-localize raised: %s", exc)
         return last_result
+
+    def _current_localization_waypoint(self) -> str:
+        """Vrátí aktuální waypoint_id robota, nebo prázdný string při chybě."""
+        client = getattr(self._bundle.session, "graph_nav_client", None)
+        if client is None:
+            return ""
+        try:
+            state = client.get_localization_state()
+        except Exception as exc:
+            _log.debug("get_localization_state failed: %s", exc)
+            return ""
+        return getattr(getattr(state, "localization", None), "waypoint_id", "") or ""
 
     def _is_localized_on_current_graph(self) -> bool:
         """Ověří přes `get_localization_state`, že robot je na nahraném grafu.
@@ -338,22 +408,83 @@ class PlaybackService(QObject):
         return True
 
     def _localize_with_fallback(self, meta: MapMetadata) -> None:
-        from app.models import LocalizationStrategy
+        """Strictní lokalizace na startovní fiducial + hint na start_waypoint.
 
-        if meta.fiducial_id is not None:
+        **Proč ne autonomy.localize:** autonomy `SPECIFIC_FIDUCIAL` strategie
+        nenastavuje `initial_guess.waypoint_id` — bosdyn pak vybere náhodnou
+        observaci fiducialu v mapě (fiducial je obvykle zaznamenán z více
+        waypointů). Výsledek: občas je robot lokalizován uprostřed mapy místo
+        u startu → `navigate_to(CP_001)` plánuje cestu z mis-lokalizované
+        pozice → robot jede na nejvzdálenější místo, větve ignoruje.
+
+        Fix: vlastní wrapper v `spot_operator/robot/localize_strict.py` který
+        volá bosdyn přímo s `initial_guess.waypoint_id = start_waypoint_id`
+        + `FIDUCIAL_INIT_SPECIFIC`. Bosdyn tak preferuje observaci fiducialu
+        blízko startu, ne random.
+
+        Verifikuje localized_waypoint_id vůči `meta.start_waypoint_id` a
+        pokud se liší, raise (abort místo tiché divné chůze).
+        """
+        from app.models import LocalizationStrategy
+        from spot_operator.robot.localize_strict import localize_at_start
+
+        if meta.fiducial_id is None:
+            # Mapa nemá zapsaný fiducial_id (recording bug).
+            _log.warning(
+                "Map %s nemá meta.fiducial_id — používám FIDUCIAL_NEAREST jako last resort.",
+                meta.name,
+            )
+            self._navigator.localize(strategy=LocalizationStrategy.FIDUCIAL_NEAREST)
+            return
+
+        if not meta.start_waypoint_id:
+            # Žádný hint — spadneme na autonomy SPECIFIC_FIDUCIAL bez initial_guess.
+            _log.warning(
+                "Map %s nemá start_waypoint_id — lokalizuji bez hintu (může být mis-lokalizováno).",
+                meta.name,
+            )
             try:
                 self._navigator.localize(
                     strategy=LocalizationStrategy.SPECIFIC_FIDUCIAL,
                     fiducial_id=meta.fiducial_id,
                 )
-                return
             except Exception as exc:
-                _log.warning(
-                    "Localize to specific fiducial %s failed: %s. Falling back to nearest.",
-                    meta.fiducial_id,
-                    exc,
-                )
-        self._navigator.localize(strategy=LocalizationStrategy.FIDUCIAL_NEAREST)
+                raise RuntimeError(
+                    f"Lokalizace na mapě '{meta.name}' selhala: "
+                    f"SPECIFIC_FIDUCIAL s id={meta.fiducial_id} nenalezlo "
+                    f"fiducial v kameře Spota ({exc}). Přibliž Spota k fiducialu."
+                ) from exc
+            return
+
+        # Hlavní cesta: strict localize s hintem na start_waypoint.
+        try:
+            localized_wp = localize_at_start(
+                self._bundle.session,
+                fiducial_id=meta.fiducial_id,
+                start_waypoint_id=meta.start_waypoint_id,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Lokalizace na mapě '{meta.name}' selhala (fiducial_id="
+                f"{meta.fiducial_id}, start={meta.start_waypoint_id}): {exc}. "
+                f"Přibliž Spota k fiducialu a zkus znovu."
+            ) from exc
+
+        # Ověření: skončili jsme opravdu blízko startu?
+        if localized_wp != meta.start_waypoint_id:
+            # Není to nutně chyba — bosdyn může vrátit jiný blízký waypoint
+            # pokud robot stojí mírně stranou od start_waypoint. Ale pokud
+            # je rozdíl velký, bude to problém v navigaci. Logujem hlasitě.
+            _log.warning(
+                "Localize drift: bosdyn vrátil waypoint %s, očekávali jsme start=%s. "
+                "Pokud robot jede zmatečně, přibliž ho blíž k fiducialu a zkus znovu.",
+                localized_wp, meta.start_waypoint_id,
+            )
+        else:
+            _log.info(
+                "Localize exactly at start_waypoint %s — kalibrace OK.",
+                localized_wp,
+            )
 
     def _extract_checkpoints(self, meta: MapMetadata) -> list[CheckpointRef]:
         data = meta.checkpoints_json or {}
