@@ -71,10 +71,32 @@ def localize_at_start(
     try:
         resp = client.set_localization(**kwargs)
     except Exception as exc:
+        # PR-05 FIND-068: klasifikace specifických bosdyn chyb by bylo
+        # ideální (FiducialNotFoundError vs NetworkError), ale autonomy
+        # jejich typy nereflektuje public. Minimálně CZ wrap + pass exc.
+        msg = str(exc).lower()
+        if "fiducial" in msg and ("not" in msg or "visible" in msg):
+            raise RuntimeError(
+                f"Fiducial {fiducial_id} není vidět v kameře nebo není v mapě. "
+                "Přibliž Spota k fiducialu a zkus znovu."
+            ) from exc
         raise RuntimeError(
             f"Bosdyn set_localization selhal (fiducial_id={fiducial_id}, "
             f"start_waypoint={start_waypoint_id}): {exc}"
         ) from exc
+
+    # PR-05 FIND-067: pokud bosdyn reportuje ambiguity, logujeme warning.
+    # Pole response se liší mezi bosdyn verzemi — použij getattr.
+    ambiguity = getattr(resp, "ambiguity_result", None)
+    if ambiguity is not None:
+        ratio = getattr(ambiguity, "ambiguous_ratio", None)
+        if ratio is not None and ratio > 0.5:
+            _log.warning(
+                "localize_at_start: ambiguity_result ratio=%.2f (>0.5) — "
+                "bosdyn vybral jednu z podobných fiducial observací. "
+                "Pokud robot jede zmatečně, přibliž ho blíž k fiducialu.",
+                ratio,
+            )
 
     try:
         localized_wp = resp.localization.waypoint_id

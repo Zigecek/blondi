@@ -58,7 +58,7 @@ class CheckpointRef:
     name: str
     waypoint_id: str
     kind: str
-    capture_sources: list[str]
+    capture_sources: tuple[str, ...]
 
 
 class PlaybackService(QObject):
@@ -72,6 +72,10 @@ class PlaybackService(QObject):
     run_completed = Signal(int, int)  # success, total
     run_failed = Signal(str)
     progress = Signal(str)
+    # PR-05 FIND-097: drift warning pro UI display (nehalí playback).
+    drift_detected = Signal(str, str, str)  # cp_name, actual_wp, target_wp
+    # PR-05 FIND-104: avoidance setting failure — UI rozhodne pokračovat.
+    avoidance_failed = Signal(str)
 
     def __init__(self, bundle: Any, parent: QObject | None = None):
         super().__init__(parent)
@@ -116,8 +120,17 @@ class PlaybackService(QObject):
             _log.warning("navigator.request_abort failed: %s", exc)
 
     def request_return_home(self) -> None:
-        """Požádá o návrat domů — běží asynchronně přes RunReturnHomeThread."""
-        # Reálně spouštíme v samostatném threadu, protože navigate_to blokuje.
+        """DEPRECATED: dřívější alias pro request_abort.
+
+        PR-05 FIND-093: metoda neimplementovala skutečný return home,
+        jen volala request_abort. UI (PlaybackRunPage._on_stop_return)
+        teď explicit spouští _ReturnHomeThread. Zachováno jen pro
+        backward compat — delegation zůstává na request_abort.
+        """
+        _log.warning(
+            "request_return_home() je deprecated — volej request_abort + "
+            "explicit return_home() v BG threadu."
+        )
         self.request_abort()
 
     # ---- Hlavní orchestrace ----
@@ -167,45 +180,29 @@ class PlaybackService(QObject):
     def run_all_checkpoints(
         self, meta: MapMetadata, *, operator_label: str | None
     ) -> int:
-        """Spustí autonomní průjezd checkpointů. Vrátí run_id."""
+        """Spustí autonomní průjezd checkpointů. Vrátí run_id.
+
+        PR-05 FIND-086: run je vytvořen v DB **před** pre-flight checks,
+        takže i neúspěšné pokusy jsou v audit trail (CRUD → Běhy).
+        """
         self._abort_requested = False
         self._last_run_status = RunStatus.running
         self._last_abort_reason = None
         self._checkpoint_results = []
-        checkpoints = self._extract_checkpoints(meta)
-        if not checkpoints:
-            raise RuntimeError("Mapa neobsahuje žádné checkpointy.")
 
-        # KRITICKÁ pojistka: pokud robot není lokalizován v aktuální mapě,
-        # `navigate_to` by na základě stale odometrie jel zcela špatným směrem
-        # → timeout → "běží na konec mapy". Abort raději teď, než to způsobí
-        # fyzickou situaci.
-        if not self._is_localized_on_current_graph():
-            raise RuntimeError(
-                "Robot není lokalizován na aktuální mapě. Vrať se k fiducialu "
-                "a zkus playback znovu."
+        # Extract checkpoints — může raise ValueError (viz FIND-103).
+        try:
+            checkpoints = self._extract_checkpoints(meta)
+        except ValueError as exc:
+            self._create_run_and_fail(
+                meta=meta,
+                operator_label=operator_label,
+                total=0,
+                reason=f"Mapa nelze načíst: {exc}",
             )
+            raise RuntimeError(f"Mapa neobsahuje žádné checkpointy: {exc}") from exc
 
-        # Diagnostika před spuštěním: kde si robot myslí že je, a v jakém
-        # pořadí budeme navštěvovat checkpointy. Když user hlásí "robot jede
-        # na nejvzdálenější místo", tohle ukáže co skutečně GraphNav vidí.
-        localized_wp = self._current_localization_waypoint()
-        expected_start = meta.start_waypoint_id or "(neznámý)"
-        _log.info(
-            "Playback start — localized waypoint: %s, expected start_waypoint_id: %s",
-            localized_wp or "(neznámý)", expected_start,
-        )
-        if localized_wp and expected_start != "(neznámý)" and localized_wp != expected_start:
-            raise RuntimeError(
-                "Robot je lokalizovaný na jiném waypointu než start mapy "
-                f"({localized_wp} != {expected_start}). Přibliž Spota k fiducialu a zkus znovu."
-            )
-        _log.info(
-            "Checkpoint order (%d): %s",
-            len(checkpoints),
-            ", ".join(f"{c.name}->{c.waypoint_id[:12]}..." for c in checkpoints),
-        )
-
+        # Create run v DB hned — i neúspěšný pre-flight zanechá audit trail.
         with Session() as s:
             run_code = runs_repo.generate_unique_run_code(s)
             run = runs_repo.create(
@@ -223,9 +220,41 @@ class PlaybackService(QObject):
         self.run_started.emit(self._run_id)
         _log.info("Run %s created (map=%s, checkpoints=%d)", run_code, meta.name, len(checkpoints))
 
+        # --- Pre-flight checks (post-create). ---
+        # Single localization state call (FIND-087): použij hodnoty napříč.
+        localized_wp = self._current_localization_waypoint()
+        expected_start = meta.start_waypoint_id or "(neznámý)"
+        _log.info(
+            "Playback pre-flight — localized waypoint: %s, expected start_waypoint_id: %s",
+            localized_wp or "(neznámý)", expected_start,
+        )
+        if not self._is_localized_on_current_graph():
+            self._finalize_failed_run(
+                "Robot není lokalizován na aktuální mapě. "
+                "Vrať se k fiducialu a zkus playback znovu."
+            )
+            raise RuntimeError(
+                "Robot není lokalizován na aktuální mapě. Vrať se k fiducialu "
+                "a zkus playback znovu."
+            )
+        if localized_wp and expected_start != "(neznámý)" and localized_wp != expected_start:
+            msg = (
+                f"Robot je lokalizovaný na jiném waypointu než start mapy "
+                f"({localized_wp} != {expected_start}). Přibliž Spota k fiducialu a zkus znovu."
+            )
+            self._finalize_failed_run(msg)
+            raise RuntimeError(msg)
+
+        _log.info(
+            "Checkpoint order (%d): %s",
+            len(checkpoints),
+            ", ".join(f"{c.name}->{c.waypoint_id[:12]}..." for c in checkpoints),
+        )
+
         # Nastav globální obstacle avoidance strength pro playback.
         # GraphNav nepřijímá padding přes TravelParams, ale robot si pamatuje
         # mobility state → synchro_stand s požadovanou strength to nastaví.
+        # PR-05 FIND-104: emit signal pro UI místo silent warning.
         try:
             from app.robot.mobility_state import set_global_avoidance
 
@@ -238,6 +267,10 @@ class PlaybackService(QObject):
                 "Nepodařilo se nastavit global avoidance (strength=%d): %s",
                 PLAYBACK_AVOIDANCE_STRENGTH,
                 exc,
+            )
+            self.avoidance_failed.emit(
+                f"Obstacle avoidance (strength={PLAYBACK_AVOIDANCE_STRENGTH}) nenastaveno: {exc}. "
+                "Robot pojede s default padding — může být méně opatrný u překážek."
             )
 
         # Persist meta pro přístup z retry smyčky (strict re-localize recovery).
@@ -336,8 +369,23 @@ class PlaybackService(QObject):
                     success += 1
                 consecutive_nav_fails = 0
                 self._record_checkpoint_result(checkpoint_result, success)
+            except (KeyboardInterrupt, MemoryError, SystemExit):
+                # Kritické exceptions propagujeme — v žádném případě
+                # nepokračovat v playbacku.
+                raise
             except Exception as exc:
+                # Klasifikace: DB transient vs permanent.
+                from sqlalchemy.exc import OperationalError, ProgrammingError
+
+                if isinstance(exc, ProgrammingError):
+                    # DB schema mismatch — další CP taky padne, abort.
+                    _log.exception(
+                        "DB schema error at %s — aborting run: %s", cp.name, exc
+                    )
+                    abort_reason = f"DB schema error at {cp.name}: {exc}"
+                    break
                 _log.exception("Checkpoint %s failed: %s", cp.name, exc)
+                transient_db = isinstance(exc, OperationalError)
                 checkpoint_result = build_checkpoint_result(
                     name=cp.name,
                     waypoint_id=cp.waypoint_id,
@@ -350,8 +398,13 @@ class PlaybackService(QObject):
                     started_at=started_at,
                     finished_at=datetime.now(timezone.utc),
                 )
-                self._record_checkpoint_result(checkpoint_result, success)
+                try:
+                    self._record_checkpoint_result(checkpoint_result, success)
+                except Exception as record_exc:
+                    _log.warning("Failed to record error result: %s", record_exc)
                 abort_reason = f"exception at {cp.name}: {exc}"
+                if transient_db:
+                    _log.info("Transient DB error — pokračuji na další CP")
                 continue
 
         final_status = self._classify_final_status(success, total, abort_reason)
@@ -378,9 +431,18 @@ class PlaybackService(QObject):
         return self._run_id
 
     def return_home(self, start_wp_id: str):
-        """Volá return_home utilitu z autonomy."""
+        """Volá return_home utilitu z autonomy.
+
+        PR-05 FIND-100: pre-check že robot je lokalizován před voláním
+        autonomy return_home — jinak by jel do náhodného místa.
+        """
         from app.robot.return_home import return_home
 
+        if not self._is_localized_on_current_graph():
+            raise RuntimeError(
+                "Robot není lokalizován v mapě — návrat domů nelze spustit. "
+                "Zkus re-localize nebo fyzicky pohni Spotem k fiducialu."
+            )
         self._emit_progress("Návrat domů...")
         if self._run_id is not None:
             with Session() as s:
@@ -436,18 +498,34 @@ class PlaybackService(QObject):
     # ---- Internal helpers ----
 
     def _should_retry_outcome(self, result) -> bool:  # noqa: ANN001 — NavigationResult
-        """Rozšíření ``result.is_localization_loss`` o TIMEOUT.
+        """Whitelist outcome-ů, kde re-localize + retry má smysl.
 
-        Autonomy definuje ``is_localization_loss`` jen pro LOST/NOT_LOCALIZED.
-        Ale TIMEOUT typicky znamená, že robot je mis-localized (nehýbe se ke
-        špatné cílové pozici a 30 s okno vyprší). Po re-localize má velkou
-        šanci uspět, takže retry-ujeme stejně.
+        PR-05 FIND-089: rozšířeno o STUCK (dočasná překážka) a NO_ROUTE
+        (GraphNav má stale state) — obojí se po re-localize může uvolnit.
+        Neznámé nové NavigationOutcome hodnoty logujeme jako warning
+        (forward-compat; FIND-176).
         """
         from app.models import NavigationOutcome
 
         if result.is_localization_loss:
             return True
-        return result.outcome == NavigationOutcome.TIMEOUT
+        retryable = {
+            NavigationOutcome.TIMEOUT,
+            NavigationOutcome.LOST,
+            NavigationOutcome.NOT_LOCALIZED,
+            NavigationOutcome.STUCK,
+            NavigationOutcome.NO_ROUTE,
+        }
+        outcome = result.outcome
+        known_outcomes = set(NavigationOutcome)
+        if outcome not in known_outcomes:
+            _log.warning(
+                "Neznámá NavigationOutcome hodnota %r — autonomy může být "
+                "novější než spot_operator; outcome nebude retryován.",
+                outcome,
+            )
+            return False
+        return outcome in retryable
 
     def _navigate_with_retry(self, cp: "CheckpointRef", max_retries: int = 2):
         """Wrapper kolem `navigator.navigate_to` s re-localize při LOST/TIMEOUT.
@@ -534,6 +612,9 @@ class PlaybackService(QObject):
         """Informativní warning pokud po úspěšném navigate_to skončil robot
         na jiném waypointu než bylo cílem. Neabortuje — jen signalizuje
         akumulující se odometry drift (prekurzor RobotLostError).
+
+        PR-05 FIND-097: navíc emit ``drift_detected`` Qt signal pro UI,
+        aby operátor viděl warning + mohl reagovat (např. re-localize).
         """
         post_wp = self._current_localization_waypoint()
         if post_wp and post_wp != cp.waypoint_id:
@@ -542,6 +623,10 @@ class PlaybackService(QObject):
                 "Drift pokračuje — riziko RobotLostError v dalších CP.",
                 cp.name, post_wp[:12], cp.waypoint_id[:12],
             )
+            try:
+                self.drift_detected.emit(cp.name, post_wp, cp.waypoint_id)
+            except Exception:
+                pass
 
     def _current_localization_waypoint(self) -> str:
         """Vrátí aktuální waypoint_id robota, nebo prázdný string při chybě."""
@@ -618,6 +703,23 @@ class PlaybackService(QObject):
                 meta.name,
             )
             self._navigator.localize(strategy=LocalizationStrategy.FIDUCIAL_NEAREST)
+            # PR-05 FIND-094: po fallback localize ověřit, že jsme skutečně
+            # na očekávaném waypointu (nebo aspoň na mapě). Bez této kontroly
+            # hrozí, že FIDUCIAL_NEAREST najde jinou observaci fiducialu
+            # uprostřed mapy → playback bude mis-navigate.
+            if not self._is_localized_on_current_graph():
+                raise RuntimeError(
+                    "FIDUCIAL_NEAREST localize skončil mimo aktuální mapu. "
+                    "Přibliž Spota k fiducialu a zkus znovu."
+                )
+            localized_wp = self._current_localization_waypoint()
+            if meta.start_waypoint_id and localized_wp and localized_wp != meta.start_waypoint_id:
+                _log.warning(
+                    "FIDUCIAL_NEAREST localize: robot je na waypointu %s, "
+                    "očekáváno start=%s. Playback přesto zkusím, ale drift "
+                    "je pravděpodobný.",
+                    localized_wp[:12], meta.start_waypoint_id[:12],
+                )
             return
 
         if not meta.start_waypoint_id:
@@ -640,26 +742,16 @@ class PlaybackService(QObject):
             ) from exc
 
         if localized_wp != meta.start_waypoint_id:
+            # PR-05 FIND-095: původně tu byl druhý, nedosažitelný if
+            # (po raise výše) — odstraněn. Raise je final.
             raise RuntimeError(
                 "Lokalizace skončila na jiném waypointu než start mapy "
                 f"({localized_wp} != {meta.start_waypoint_id})."
             )
-
-        # Ověření: skončili jsme opravdu blízko startu?
-        if localized_wp != meta.start_waypoint_id:
-            # Není to nutně chyba — bosdyn může vrátit jiný blízký waypoint
-            # pokud robot stojí mírně stranou od start_waypoint. Ale pokud
-            # je rozdíl velký, bude to problém v navigaci. Logujem hlasitě.
-            _log.warning(
-                "Localize drift: bosdyn vrátil waypoint %s, očekávali jsme start=%s. "
-                "Pokud robot jede zmatečně, přibliž ho blíž k fiducialu a zkus znovu.",
-                localized_wp, meta.start_waypoint_id,
-            )
-        else:
-            _log.info(
-                "Localize exactly at start_waypoint %s — kalibrace OK.",
-                localized_wp,
-            )
+        _log.info(
+            "Localize exactly at start_waypoint %s — kalibrace OK.",
+            localized_wp,
+        )
 
     def _extract_checkpoints(self, meta: MapMetadata) -> list[CheckpointRef]:
         plan = parse_checkpoint_plan(
@@ -669,15 +761,25 @@ class PlaybackService(QObject):
             fallback_default_capture_sources=meta.default_capture_sources,
             fallback_fiducial_id=meta.fiducial_id,
         )
+        if not plan.checkpoints:
+            # Detailní příčina pro UI dialog (PR-05 FIND-103).
+            if meta.checkpoints_json is None:
+                raise ValueError(
+                    "Mapa nemá uložené checkpoints_json (legacy nebo corrupted mapa)."
+                )
+            raise ValueError(
+                "Mapa má prázdný seznam checkpointů (možná zrušené recording)."
+            )
+        # `waypoint_id` je už validated v parse_checkpoint_plan přes
+        # _required_str (PR-05 FIND-102 — defensive filter odstraněn).
         return [
             CheckpointRef(
                 name=cp.name,
                 waypoint_id=cp.waypoint_id,
                 kind=cp.kind,
-                capture_sources=list(cp.capture_sources),
+                capture_sources=tuple(cp.capture_sources),
             )
             for cp in plan.checkpoints
-            if cp.waypoint_id
         ]
 
     def _capture_at_checkpoint(self, cp: CheckpointRef) -> CaptureSummary:
@@ -736,15 +838,69 @@ class PlaybackService(QObject):
     def _classify_final_status(
         self, success: int, total: int, abort_reason: Optional[str]
     ) -> RunStatus:
+        # PR-05 FIND-101: success == total beats abort — pokud všechny CP
+        # prošly, je run completed i kdyby operátor kliknul Abort na
+        # poslední moment.
+        if success == total and total > 0:
+            return RunStatus.completed
         if abort_reason:
             if abort_reason == "Aborted by user":
                 return RunStatus.aborted
             if success == 0:
                 return RunStatus.failed
             return RunStatus.partial
-        if success == total:
-            return RunStatus.completed
         return RunStatus.partial
+
+    def _create_run_and_fail(
+        self,
+        *,
+        meta: MapMetadata,
+        operator_label: str | None,
+        total: int,
+        reason: str,
+    ) -> None:
+        """Vytvoří run (pro audit) a okamžitě ho označí failed.
+
+        Volá se při pre-flight failure, kdy nelze vyexportovat checkpointy.
+        """
+        try:
+            with Session() as s:
+                run_code = runs_repo.generate_unique_run_code(s)
+                run = runs_repo.create(
+                    s,
+                    run_code=run_code,
+                    map_id=meta.id,
+                    map_name_snapshot=meta.name,
+                    checkpoints_total=total,
+                    operator_label=operator_label,
+                    start_waypoint_id=meta.start_waypoint_id,
+                    checkpoint_results_json=[],
+                )
+                s.commit()
+                self._run_id = run.id
+            self._finalize_failed_run(reason)
+        except Exception as exc:
+            _log.exception("Failed to create audit run for pre-flight failure: %s", exc)
+
+    def _finalize_failed_run(self, reason: str) -> None:
+        """Update existing run record k failed state."""
+        if self._run_id is None:
+            return
+        try:
+            with Session() as s:
+                runs_repo.finish(
+                    s,
+                    self._run_id,
+                    status=RunStatus.failed,
+                    checkpoints_reached=0,
+                    abort_reason=reason,
+                )
+                s.commit()
+        except Exception as exc:
+            _log.warning("Failed to finalize failed run: %s", exc)
+        self._last_run_status = RunStatus.failed
+        self._last_abort_reason = reason
+        self.run_failed.emit(reason)
 
     def _record_checkpoint_result(
         self, checkpoint_result: CheckpointResult, success_count: int
