@@ -488,11 +488,11 @@ class PlaybackService(QObject):
             raise
 
     def cleanup(self) -> None:
-        """Smaže temp extrahovanou mapu."""
+        """Smaže temp extrahovanou mapu s retry handling (PR-12 FIND-096)."""
         if self._map_temp_dir is not None:
-            import shutil
+            from spot_operator.services.map_storage import safe_rmtree
 
-            shutil.rmtree(self._map_temp_dir, ignore_errors=True)
+            safe_rmtree(self._map_temp_dir)
             self._map_temp_dir = None
 
     # ---- Internal helpers ----

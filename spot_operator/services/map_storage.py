@@ -10,11 +10,40 @@ Playback flow:
 from __future__ import annotations
 
 import shutil
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterator
 from uuid import uuid4
+
+
+def safe_rmtree(path: Path, *, retries: int = 3, delay_s: float = 0.5) -> bool:
+    """Smaže ``path`` s retry na OSError (Windows filelock).
+
+    PR-12 FIND-051: ``shutil.rmtree(..., ignore_errors=True)`` na Windows
+    tiše ignorovala zamčené soubory → temp se plnil. Tato helper retryuje
+    a při neúspěchu loguje warning.
+
+    Vrací True pokud se podařilo smazat.
+    """
+    from spot_operator.logging_config import get_logger
+
+    log = get_logger(__name__)
+    for attempt in range(retries):
+        if not path.exists():
+            return True
+        try:
+            shutil.rmtree(path)
+            return True
+        except OSError as exc:
+            log.debug("rmtree %s attempt %d failed: %s", path, attempt + 1, exc)
+            time.sleep(delay_s * (attempt + 1))
+    log.warning(
+        "rmtree %s failed after %d retries — zanechávám (může zaplnit disk)",
+        path, retries,
+    )
+    return False
 
 from spot_operator.db.engine import Session
 from spot_operator.db.models import Map
@@ -48,13 +77,17 @@ class MapNameAlreadyExistsError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class MapMetadata:
-    """Lehký DTO pro čtení z DB bez zatažení celého BYTEA."""
+    """Lehký DTO pro čtení z DB bez zatažení celého BYTEA.
+
+    PR-12 FIND-056: ``default_capture_sources`` je tuple (immutable)
+    pro konzistenci s ``MapPlan.default_capture_sources``.
+    """
 
     id: int
     name: str
     fiducial_id: int | None
     start_waypoint_id: str | None
-    default_capture_sources: list[str]
+    default_capture_sources: tuple[str, ...]
     waypoints_count: int | None
     checkpoints_count: int | None
     checkpoints_json: dict[str, Any] | None
@@ -71,7 +104,7 @@ def _to_metadata(m: Map) -> MapMetadata:
         name=m.name,
         fiducial_id=m.fiducial_id,
         start_waypoint_id=m.start_waypoint_id,
-        default_capture_sources=list(m.default_capture_sources or []),
+        default_capture_sources=tuple(m.default_capture_sources or []),
         waypoints_count=m.waypoints_count,
         checkpoints_count=m.checkpoints_count,
         checkpoints_json=m.checkpoints_json,
@@ -170,7 +203,12 @@ def save_map_to_db(
 
 
 def load_map_to_temp(map_id: int, temp_root: Path) -> tuple[Path, MapMetadata]:
-    """Extrahuje mapu z DB do temp_root/map_<id>_<uuid>/. Vrací (target_dir, metadata)."""
+    """Extrahuje mapu z DB do temp_root/map_<id>_<uuid>/. Vrací (target_dir, metadata).
+
+    PR-12 FIND-047: load je pure read — validace in-memory bez DB side-effectu.
+    Pokud chceš revalidovat a updatovat ``archive_is_valid`` v DB,
+    použij explicit :func:`revalidate_map_in_db`.
+    """
     with Session() as s:
         m = s.get(Map, map_id)
         if m is None:
@@ -181,7 +219,7 @@ def load_map_to_temp(map_id: int, temp_root: Path) -> tuple[Path, MapMetadata]:
 
     target = temp_root / f"map_{map_id}_{uuid4().hex}"
     extract_map_archive(archive, sha, target)
-    meta = _validate_loaded_map(map_id, target, meta)
+    meta = _validate_loaded_map_in_memory(map_id, target, meta)
     _log.info("Map %s extracted to %s", map_id, target)
     return target, meta
 
@@ -194,8 +232,8 @@ def map_extracted(map_id: int, temp_root: Path) -> Iterator[tuple[Path, MapMetad
         target, meta = load_map_to_temp(map_id, temp_root)
         yield target, meta
     finally:
-        if target is not None and target.exists():
-            shutil.rmtree(target, ignore_errors=True)
+        if target is not None:
+            safe_rmtree(target)
             _log.debug("Temp map dir cleaned up: %s", target)
 
 
@@ -208,54 +246,84 @@ def read_map_metadata(map_id: int) -> MapMetadata | None:
         return _to_metadata(m)
 
 
-def _validate_loaded_map(map_id: int, map_dir: Path, meta: MapMetadata) -> MapMetadata:
-    try:
-        plan = parse_checkpoint_plan(
-            meta.checkpoints_json,
-            fallback_map_name=meta.name,
-            fallback_start_waypoint_id=meta.start_waypoint_id,
-            fallback_default_capture_sources=meta.default_capture_sources,
-            fallback_fiducial_id=meta.fiducial_id,
+def _validate_loaded_map_in_memory(
+    map_id: int, map_dir: Path, meta: MapMetadata
+) -> MapMetadata:
+    """In-memory validate (PR-12 FIND-047) — žádný side-effect do DB.
+
+    Pokud chceš DB update, použij :func:`revalidate_map_in_db`.
+    """
+    plan = parse_checkpoint_plan(
+        meta.checkpoints_json,
+        fallback_map_name=meta.name,
+        fallback_start_waypoint_id=meta.start_waypoint_id,
+        fallback_default_capture_sources=meta.default_capture_sources,
+        fallback_fiducial_id=meta.fiducial_id,
+    )
+    effective_start_waypoint_id = meta.start_waypoint_id or plan.start_waypoint_id
+    if not effective_start_waypoint_id:
+        raise RuntimeError(
+            f"Mapa '{meta.name}' nemá start_waypoint_id — playback ji odmítá načíst."
         )
-        effective_start_waypoint_id = meta.start_waypoint_id or plan.start_waypoint_id
-        if not effective_start_waypoint_id:
-            raise ValueError("Mapa nemá start_waypoint_id.")
+    try:
         validate_map_dir(
             map_dir,
             expected_start_waypoint_id=effective_start_waypoint_id,
             checkpoint_waypoint_ids=[cp.waypoint_id for cp in plan.checkpoints],
         )
     except Exception as exc:
-        message = str(exc)
+        raise RuntimeError(
+            f"Mapa '{meta.name}' je neplatná a playback ji odmítl načíst: {exc}"
+        ) from exc
+    return replace(
+        meta,
+        start_waypoint_id=effective_start_waypoint_id,
+        metadata_version=max(meta.metadata_version, MAP_METADATA_SCHEMA_VERSION),
+    )
+
+
+def revalidate_map_in_db(map_id: int, temp_root: Path) -> MapMetadata:
+    """Explicit revalidate mapy (extract + validate + update DB).
+
+    Volá se z admin UI / CLI, ne z playback loadu. Pokud se validace
+    nepodaří, update ``archive_is_valid=False`` s error zprávou.
+    Pokud projde, update ``archive_is_valid=True``.
+    """
+    target, meta = load_map_to_temp(map_id, temp_root)
+    try:
+        # load_map_to_temp už validuje in-memory. Pokud projde bez raise,
+        # updatujeme DB na valid.
+        with Session() as s:
+            maps_repo.update_validation(
+                s,
+                map_id,
+                archive_is_valid=True,
+                archive_validation_error=None,
+                metadata_version=max(
+                    meta.metadata_version, MAP_METADATA_SCHEMA_VERSION
+                ),
+            )
+            s.commit()
+        return replace(
+            meta,
+            archive_is_valid=True,
+            archive_validation_error=None,
+        )
+    except Exception as exc:
         with Session() as s:
             maps_repo.update_validation(
                 s,
                 map_id,
                 archive_is_valid=False,
-                archive_validation_error=message,
-                metadata_version=max(meta.metadata_version, MAP_METADATA_SCHEMA_VERSION),
+                archive_validation_error=str(exc),
+                metadata_version=max(
+                    meta.metadata_version, MAP_METADATA_SCHEMA_VERSION
+                ),
             )
             s.commit()
-        raise RuntimeError(
-            f"Mapa '{meta.name}' je neplatná a playback ji odmítl načíst: {message}"
-        ) from exc
-
-    with Session() as s:
-        maps_repo.update_validation(
-            s,
-            map_id,
-            archive_is_valid=True,
-            archive_validation_error=None,
-            metadata_version=max(meta.metadata_version, MAP_METADATA_SCHEMA_VERSION),
-        )
-        s.commit()
-    return replace(
-        meta,
-        start_waypoint_id=meta.start_waypoint_id or plan.start_waypoint_id,
-        metadata_version=max(meta.metadata_version, MAP_METADATA_SCHEMA_VERSION),
-        archive_is_valid=True,
-        archive_validation_error=None,
-    )
+        raise
+    finally:
+        safe_rmtree(target)
 
 
 def list_all_metadata(limit: int | None = None) -> list[MapMetadata]:
@@ -297,6 +365,8 @@ __all__ = [
     "load_map_to_temp",
     "map_extracted",
     "read_map_metadata",
+    "revalidate_map_in_db",
     "list_all_metadata",
     "cleanup_temp_root",
+    "safe_rmtree",
 ]
