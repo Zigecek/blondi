@@ -60,6 +60,7 @@ def create(
     checkpoints_total: int,
     operator_label: str | None,
     start_waypoint_id: str | None,
+    checkpoint_results_json: list[dict] | None = None,
     notes: str | None = None,
 ) -> SpotRun:
     run = SpotRun(
@@ -71,6 +72,7 @@ def create(
         start_waypoint_id=start_waypoint_id,
         notes=notes,
         status=RunStatus.running,
+        checkpoint_results_json=list(checkpoint_results_json or []),
     )
     session.add(run)
     session.flush()
@@ -152,12 +154,17 @@ def get_summary(session: Session, run_id: int) -> RunSummary | None:
     )
 
 
-def mark_progress(session: Session, run_id: int, checkpoints_reached: int) -> None:
-    session.execute(
-        update(SpotRun)
-        .where(SpotRun.id == run_id)
-        .values(checkpoints_reached=checkpoints_reached)
-    )
+def mark_progress(
+    session: Session,
+    run_id: int,
+    checkpoints_reached: int,
+    *,
+    checkpoint_results_json: list[dict] | None = None,
+) -> None:
+    values: dict = {"checkpoints_reached": checkpoints_reached}
+    if checkpoint_results_json is not None:
+        values["checkpoint_results_json"] = checkpoint_results_json
+    session.execute(update(SpotRun).where(SpotRun.id == run_id).values(**values))
 
 
 def finish(
@@ -167,6 +174,7 @@ def finish(
     status: RunStatus,
     checkpoints_reached: int | None = None,
     abort_reason: str | None = None,
+    checkpoint_results_json: list[dict] | None = None,
 ) -> None:
     values: dict = {
         "status": status,
@@ -176,6 +184,8 @@ def finish(
         values["checkpoints_reached"] = checkpoints_reached
     if abort_reason is not None:
         values["abort_reason"] = abort_reason
+    if checkpoint_results_json is not None:
+        values["checkpoint_results_json"] = checkpoint_results_json
     session.execute(update(SpotRun).where(SpotRun.id == run_id).values(**values))
 
 
@@ -183,6 +193,34 @@ def generate_run_code(now: datetime | None = None) -> str:
     """Vygeneruje lidský run_code typu `run_20260422_1530`."""
     now = now or datetime.now(timezone.utc)
     return now.strftime("run_%Y%m%d_%H%M%S")
+
+
+def generate_unique_run_code(
+    session: Session, now: datetime | None = None, *, max_attempts: int = 20
+) -> str:
+    base = generate_run_code(now=now)
+    for attempt in range(max_attempts):
+        candidate = base if attempt == 0 else f"{base}_{attempt:02d}"
+        exists = session.execute(
+            select(SpotRun.id).where(SpotRun.run_code == candidate).limit(1)
+        ).scalar_one_or_none()
+        if exists is None:
+            return candidate
+    raise RuntimeError("Could not generate a unique run_code.")
+
+
+def set_return_home(
+    session: Session,
+    run_id: int,
+    *,
+    status: str,
+    reason: str | None = None,
+) -> None:
+    session.execute(
+        update(SpotRun)
+        .where(SpotRun.id == run_id)
+        .values(return_home_status=status, return_home_reason=reason)
+    )
 
 
 __all__ = [
@@ -197,4 +235,6 @@ __all__ = [
     "mark_progress",
     "finish",
     "generate_run_code",
+    "generate_unique_run_code",
+    "set_return_home",
 ]

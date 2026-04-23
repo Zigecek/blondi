@@ -34,8 +34,9 @@ from spot_operator.constants import (
     pick_side_source,
 )
 from spot_operator.logging_config import get_logger
+from spot_operator.services.contracts import validate_sources_known
 from spot_operator.services.recording_service import RecordingService
-from spot_operator.ui.common.dialogs import confirm_dialog, error_dialog
+from spot_operator.ui.common.dialogs import confirm_dialog, error_dialog, info_dialog
 from spot_operator.ui.common.estop_floating import EstopFloating
 from spot_operator.ui.common.photo_confirm_overlay import PhotoConfirmOverlay
 
@@ -179,19 +180,23 @@ class TeleopRecordPage(QWizardPage):
         if bundle is None:
             error_dialog(self, "Chyba", "Není navázané spojení se Spotem.")
             return
+        state = wizard.recording_state()  # type: ignore[attr-defined]
 
         # Auto-resolve konkrétní jména image sources podle toho, co Spot
         # advertisuje (některé firmwary: `left_fisheye_image`, jiné
         # `frontleft_fisheye_image`). available_sources ukládá LoginPage do
         # wizard property po úspěšném connect.
-        available = wizard.property("available_sources") or []
+        available = list(state.available_sources)
         if available:
-            self._camera_left = (
-                pick_side_source(available, PREFERRED_LEFT_CANDIDATES) or CAMERA_LEFT
-            )
-            self._camera_right = (
-                pick_side_source(available, PREFERRED_RIGHT_CANDIDATES) or CAMERA_RIGHT
-            )
+            left = pick_side_source(available, PREFERRED_LEFT_CANDIDATES)
+            right = pick_side_source(available, PREFERRED_RIGHT_CANDIDATES)
+            if left is None or right is None:
+                raise RuntimeError(
+                    "Spot neadvertizuje očekávané levé/pravé kamery; "
+                    f"dostupné zdroje: {', '.join(available)}"
+                )
+            self._camera_left = left
+            self._camera_right = right
             _log.info(
                 "Teleop capture sources: left=%s right=%s",
                 self._camera_left,
@@ -205,7 +210,7 @@ class TeleopRecordPage(QWizardPage):
             )
 
         self._service = RecordingService(bundle)
-        fiducial_id = wizard.property("fiducial_id")
+        fiducial_id = state.fiducial_id
         # `default_capture_sources` v DB mapě je "obě strany, které tenhle robot
         # umí" — operátor u jednotlivých checkpointů volí individuálně přes
         # tlačítka [ ] P.
@@ -224,7 +229,7 @@ class TeleopRecordPage(QWizardPage):
 
         # Sdílíme service s následující SaveMapPage přes wizard property
         # (místo křehkého iterování přes pageIds()).
-        wizard.setProperty("recording_service", self._service)
+        state.recording_service = self._service
 
         self._ensure_image_pipeline(bundle)
         self._ensure_estop_widget(wizard, bundle)
@@ -300,6 +305,11 @@ class TeleopRecordPage(QWizardPage):
                 self._service.abort()
             except Exception as exc:
                 _log.warning("RecordingService abort failed: %s", exc)
+        wizard = self.wizard()
+        state_getter = getattr(wizard, "recording_state", None)
+        if callable(state_getter):
+            state = state_getter()
+            state.recording_service = None
 
         _log.info("TeleopRecordPage teardown complete")
 
@@ -490,12 +500,33 @@ class TeleopRecordPage(QWizardPage):
         from app.robot.images import ImagePoller
 
         try:
+            state = self.wizard().recording_state()  # type: ignore[attr-defined]
+            valid_sources = validate_sources_known(
+                sources,
+                state.available_sources,
+                context="Recording checkpoint",
+            )
             poller = getattr(self, "_poller", None)
             if poller is None:
                 poller = ImagePoller(bundle.session)
                 self._poller = poller
-            self._service.capture_and_record_checkpoint(sources, image_poller=poller)
+            result = self._service.capture_and_record_checkpoint(
+                valid_sources, image_poller=poller
+            )
             self._update_counter()
+            if result.capture_status == "failed":
+                error_dialog(
+                    self,
+                    "Focení selhalo",
+                    "Nepodařilo se uložit žádný snímek. Waypoint zůstal v mapě, "
+                    "ale nebyl zapsán jako checkpoint s fotkou.",
+                )
+            elif result.capture_status == "partial":
+                info_dialog(
+                    self,
+                    "Dílčí focení",
+                    "Uložila se jen část zdrojů. Checkpoint je zapsán jako partial.",
+                )
         except Exception as exc:
             _log.exception("Capture failed: %s", exc)
             error_dialog(self, "Chyba při focení", str(exc))

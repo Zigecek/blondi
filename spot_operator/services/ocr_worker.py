@@ -151,6 +151,8 @@ class OcrWorker(QThread):
 
     def _store_results(self, photo_id: int, detections: "list[Detection]") -> None:
         with Session() as s:
+            engine_name = getattr(self._pipeline, "engine_name", "ocr")
+            detections_repo.delete_for_photo_engine(s, photo_id, engine_name)
             if detections:
                 rows = [d.to_db_row(photo_id) for d in detections]
                 detections_repo.insert_many(s, rows)

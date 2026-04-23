@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
 from spot_operator.config import AppConfig
 from spot_operator.logging_config import get_logger
 from spot_operator.services import credentials_service, spot_wifi
-from spot_operator.ui.common.workers import FunctionWorker
+from spot_operator.ui.common.workers import FunctionWorker, cleanup_worker
 
 _log = get_logger(__name__)
 
@@ -159,6 +159,13 @@ class ConnectPage(QWizardPage):
     def validatePage(self) -> bool:
         return self._connected
 
+    def cleanupPage(self) -> None:
+        self._teardown()
+
+    def _teardown(self) -> None:
+        cleanup_worker(self._worker)
+        self._worker = None
+
     # ---- Profil helpers ----
 
     def _reload_profiles(self) -> None:
@@ -201,7 +208,15 @@ class ConnectPage(QWizardPage):
         if cred_id is None:
             self._password_edit.clear()
             return
-        for cred in credentials_service.list_credentials():
+        try:
+            creds = list(credentials_service.list_credentials())
+        except Exception as exc:
+            _log.warning("profile selection failed: %s", exc)
+            self._status.setText(
+                f"<span style='color:#c62828;'>Nelze načíst profil: {exc}</span>"
+            )
+            return
+        for cred in creds:
             if cred.id == cred_id:
                 self._ip_edit.setText(cred.hostname)
                 self._username_edit.setText(cred.username)
@@ -238,9 +253,9 @@ class ConnectPage(QWizardPage):
         self._btn_connect.setEnabled(True)
         self._progress.setVisible(False)
         self._connected = True
-        # Spot_ip property používají následující stránky (FiducialPage etc.).
-        self.wizard().setProperty("spot_ip", self._ip_edit.text().strip())
-        self.wizard().set_bundle(bundle)  # type: ignore[attr-defined]
+        wizard = self.wizard()
+        wizard.set_bundle(bundle)  # type: ignore[attr-defined]
+        self._store_bundle_metadata(bundle)
 
         # Auto-detect dostupných image sources.
         try:
@@ -248,13 +263,13 @@ class ConnectPage(QWizardPage):
 
             poller = ImagePoller(bundle.session)
             sources = poller.list_sources()
-            self.wizard().setProperty("available_sources", list(sources))
             _log.info("Spot advertise %d image sources: %s", len(sources), sources)
+            self._set_available_sources(list(sources))
         except Exception as exc:
             _log.warning(
                 "Could not list image sources (fallback to defaults): %s", exc
             )
-            self.wizard().setProperty("available_sources", None)
+            self._set_available_sources([])
 
         self._status.setText(
             "<span style='color:#2e7d32;'>✓ Wi-Fi OK a Spot připojen.</span>"
@@ -287,6 +302,25 @@ class ConnectPage(QWizardPage):
             )
         except Exception as exc:
             _log.warning("Failed to save credentials: %s", exc)
+
+    def _store_bundle_metadata(self, bundle) -> None:  # noqa: ANN001
+        wizard = self.wizard()
+        ip = self._ip_edit.text().strip()
+        state_getter = getattr(wizard, "flow_state", None)
+        state = state_getter() if callable(state_getter) else None
+        if state is not None:
+            state.spot_ip = ip or None
+        else:
+            wizard.setProperty("spot_ip", ip)
+
+    def _set_available_sources(self, sources: list[str]) -> None:
+        wizard = self.wizard()
+        state_getter = getattr(wizard, "flow_state", None)
+        state = state_getter() if callable(state_getter) else None
+        if state is not None:
+            state.available_sources = list(sources)
+        else:
+            wizard.setProperty("available_sources", list(sources) or None)
 
 
 __all__ = ["ConnectPage"]

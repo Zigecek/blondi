@@ -9,11 +9,9 @@ Playback flow:
 
 from __future__ import annotations
 
-import json
 import shutil
-import tempfile
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterator
 from uuid import uuid4
@@ -22,9 +20,13 @@ from spot_operator.db.engine import Session
 from spot_operator.db.models import Map
 from spot_operator.db.repositories import maps_repo
 from spot_operator.logging_config import get_logger
+from spot_operator.services.contracts import (
+    MAP_METADATA_SCHEMA_VERSION,
+    parse_checkpoint_plan,
+)
 from spot_operator.services.map_archiver import (
-    count_waypoints_in_map_dir,
     extract_map_archive,
+    validate_map_dir,
     zip_map_dir,
 )
 
@@ -43,6 +45,9 @@ class MapMetadata:
     waypoints_count: int | None
     checkpoints_count: int | None
     checkpoints_json: dict[str, Any] | None
+    metadata_version: int
+    archive_is_valid: bool
+    archive_validation_error: str | None
     note: str | None
     archive_size_bytes: int
 
@@ -57,6 +62,9 @@ def _to_metadata(m: Map) -> MapMetadata:
         waypoints_count=m.waypoints_count,
         checkpoints_count=m.checkpoints_count,
         checkpoints_json=m.checkpoints_json,
+        metadata_version=m.metadata_version,
+        archive_is_valid=m.archive_is_valid,
+        archive_validation_error=m.archive_validation_error,
         note=m.note,
         archive_size_bytes=m.archive_size_bytes,
     )
@@ -75,8 +83,24 @@ def save_map_to_db(
     created_by_operator: str | None = None,
 ) -> int:
     """Zazipuje source_dir, spočítá SHA, uloží do DB. Vrátí map.id."""
+    plan = parse_checkpoint_plan(
+        checkpoints_json,
+        fallback_map_name=name,
+        fallback_start_waypoint_id=start_waypoint_id,
+        fallback_default_capture_sources=default_capture_sources,
+        fallback_fiducial_id=fiducial_id,
+    )
+    effective_start_waypoint_id = start_waypoint_id or plan.start_waypoint_id
+    if not effective_start_waypoint_id:
+        raise ValueError("Mapa nemá start_waypoint_id a nelze ji bezpečně uložit.")
+
+    validation = validate_map_dir(
+        source_dir,
+        expected_start_waypoint_id=effective_start_waypoint_id,
+        checkpoint_waypoint_ids=[cp.waypoint_id for cp in plan.checkpoints],
+    )
     archive, sha = zip_map_dir(source_dir)
-    waypoints_count = count_waypoints_in_map_dir(source_dir)
+    waypoints_count = len(validation.waypoint_ids)
 
     with Session() as s:
         if maps_repo.exists_by_name(s, name):
@@ -88,9 +112,12 @@ def save_map_to_db(
             archive_sha256=sha,
             archive_size_bytes=len(archive),
             fiducial_id=fiducial_id,
-            start_waypoint_id=start_waypoint_id,
+            start_waypoint_id=effective_start_waypoint_id,
             default_capture_sources=default_capture_sources,
             checkpoints_json=checkpoints_json,
+            metadata_version=MAP_METADATA_SCHEMA_VERSION,
+            archive_is_valid=True,
+            archive_validation_error=None,
             waypoints_count=waypoints_count,
             checkpoints_count=checkpoints_count,
             note=note,
@@ -121,6 +148,7 @@ def load_map_to_temp(map_id: int, temp_root: Path) -> tuple[Path, MapMetadata]:
 
     target = temp_root / f"map_{map_id}_{uuid4().hex}"
     extract_map_archive(archive, sha, target)
+    meta = _validate_loaded_map(map_id, target, meta)
     _log.info("Map %s extracted to %s", map_id, target)
     return target, meta
 
@@ -145,6 +173,56 @@ def read_map_metadata(map_id: int) -> MapMetadata | None:
         if m is None:
             return None
         return _to_metadata(m)
+
+
+def _validate_loaded_map(map_id: int, map_dir: Path, meta: MapMetadata) -> MapMetadata:
+    try:
+        plan = parse_checkpoint_plan(
+            meta.checkpoints_json,
+            fallback_map_name=meta.name,
+            fallback_start_waypoint_id=meta.start_waypoint_id,
+            fallback_default_capture_sources=meta.default_capture_sources,
+            fallback_fiducial_id=meta.fiducial_id,
+        )
+        effective_start_waypoint_id = meta.start_waypoint_id or plan.start_waypoint_id
+        if not effective_start_waypoint_id:
+            raise ValueError("Mapa nemá start_waypoint_id.")
+        validate_map_dir(
+            map_dir,
+            expected_start_waypoint_id=effective_start_waypoint_id,
+            checkpoint_waypoint_ids=[cp.waypoint_id for cp in plan.checkpoints],
+        )
+    except Exception as exc:
+        message = str(exc)
+        with Session() as s:
+            maps_repo.update_validation(
+                s,
+                map_id,
+                archive_is_valid=False,
+                archive_validation_error=message,
+                metadata_version=max(meta.metadata_version, MAP_METADATA_SCHEMA_VERSION),
+            )
+            s.commit()
+        raise RuntimeError(
+            f"Mapa '{meta.name}' je neplatná a playback ji odmítl načíst: {message}"
+        ) from exc
+
+    with Session() as s:
+        maps_repo.update_validation(
+            s,
+            map_id,
+            archive_is_valid=True,
+            archive_validation_error=None,
+            metadata_version=max(meta.metadata_version, MAP_METADATA_SCHEMA_VERSION),
+        )
+        s.commit()
+    return replace(
+        meta,
+        start_waypoint_id=meta.start_waypoint_id or plan.start_waypoint_id,
+        metadata_version=max(meta.metadata_version, MAP_METADATA_SCHEMA_VERSION),
+        archive_is_valid=True,
+        archive_validation_error=None,
+    )
 
 
 def list_all_metadata(limit: int | None = None) -> list[MapMetadata]:

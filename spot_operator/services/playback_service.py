@@ -31,6 +31,20 @@ from spot_operator.db.engine import Session
 from spot_operator.db.enums import RunStatus
 from spot_operator.db.repositories import runs_repo
 from spot_operator.logging_config import get_logger
+from spot_operator.services.contracts import (
+    CAPTURE_STATUS_FAILED,
+    CAPTURE_STATUS_NOT_APPLICABLE,
+    CAPTURE_STATUS_OK,
+    CAPTURE_STATUS_PARTIAL,
+    RETURN_HOME_STATUS_COMPLETED,
+    RETURN_HOME_STATUS_FAILED,
+    RETURN_HOME_STATUS_IN_PROGRESS,
+    CaptureSummary,
+    CheckpointResult,
+    build_checkpoint_result,
+    checkpoint_results_to_payload,
+    parse_checkpoint_plan,
+)
 from spot_operator.services.map_storage import MapMetadata, load_map_to_temp
 from spot_operator.services.photo_sink import save_photo_to_db
 
@@ -74,10 +88,25 @@ class PlaybackService(QObject):
         # `self._meta` persist pro přístup z `_navigate_with_retry` (strict
         # re-localize recovery potřebuje fiducial_id + start_waypoint_id).
         self._meta: Optional[MapMetadata] = None
+        self._checkpoint_results: list[CheckpointResult] = []
+        self._last_run_status: Optional[RunStatus] = None
+        self._last_abort_reason: Optional[str] = None
 
     @property
     def navigator(self) -> Any:
         return self._navigator
+
+    @property
+    def run_id(self) -> int | None:
+        return self._run_id
+
+    @property
+    def last_run_status(self) -> RunStatus | None:
+        return self._last_run_status
+
+    @property
+    def last_abort_reason(self) -> str | None:
+        return self._last_abort_reason
 
     def request_abort(self) -> None:
         self._abort_requested = True
@@ -139,6 +168,10 @@ class PlaybackService(QObject):
         self, meta: MapMetadata, *, operator_label: str | None
     ) -> int:
         """Spustí autonomní průjezd checkpointů. Vrátí run_id."""
+        self._abort_requested = False
+        self._last_run_status = RunStatus.running
+        self._last_abort_reason = None
+        self._checkpoint_results = []
         checkpoints = self._extract_checkpoints(meta)
         if not checkpoints:
             raise RuntimeError("Mapa neobsahuje žádné checkpointy.")
@@ -163,11 +196,9 @@ class PlaybackService(QObject):
             localized_wp or "(neznámý)", expected_start,
         )
         if localized_wp and expected_start != "(neznámý)" and localized_wp != expected_start:
-            _log.warning(
-                "Mis-localization suspicion: robot je lokalizovaný na %s, "
-                "ale start mapy je %s. Pokud trasa jede divným směrem, "
-                "přibliž Spota k fiducialu a zkus znovu.",
-                localized_wp, expected_start,
+            raise RuntimeError(
+                "Robot je lokalizovaný na jiném waypointu než start mapy "
+                f"({localized_wp} != {expected_start}). Přibliž Spota k fiducialu a zkus znovu."
             )
         _log.info(
             "Checkpoint order (%d): %s",
@@ -175,8 +206,8 @@ class PlaybackService(QObject):
             ", ".join(f"{c.name}->{c.waypoint_id[:12]}..." for c in checkpoints),
         )
 
-        run_code = runs_repo.generate_run_code()
         with Session() as s:
+            run_code = runs_repo.generate_unique_run_code(s)
             run = runs_repo.create(
                 s,
                 run_code=run_code,
@@ -185,6 +216,7 @@ class PlaybackService(QObject):
                 checkpoints_total=len(checkpoints),
                 operator_label=operator_label,
                 start_waypoint_id=meta.start_waypoint_id,
+                checkpoint_results_json=[],
             )
             s.commit()
             self._run_id = run.id
@@ -217,6 +249,7 @@ class PlaybackService(QObject):
         consecutive_nav_fails = 0
 
         for idx, cp in enumerate(checkpoints, start=1):
+            started_at = datetime.now(timezone.utc)
             if self._abort_requested:
                 abort_reason = "Aborted by user"
                 break
@@ -225,6 +258,19 @@ class PlaybackService(QObject):
                 self._emit_progress(f"Navigate to {cp.name} ({idx}/{total})")
                 result = self._navigate_with_retry(cp)
                 if not result.ok:
+                    checkpoint_result = build_checkpoint_result(
+                        name=cp.name,
+                        waypoint_id=cp.waypoint_id,
+                        nav_outcome=result.outcome.value,
+                        capture_status=CAPTURE_STATUS_NOT_APPLICABLE,
+                        expected_sources=cp.capture_sources if cp.kind == "checkpoint" else (),
+                        saved_sources=(),
+                        failed_sources=(),
+                        error=result.message,
+                        started_at=started_at,
+                        finished_at=datetime.now(timezone.utc),
+                    )
+                    self._record_checkpoint_result(checkpoint_result, success)
                     consecutive_nav_fails += 1
                     abort_reason = f"navigate failed at {cp.name}: {result.message}"
                     _log.warning(abort_reason)
@@ -264,20 +310,53 @@ class PlaybackService(QObject):
                 # Po úspěšném navigate_to — kontrola drift před capture.
                 self._warn_if_drift(cp)
 
+                capture_summary = CaptureSummary(
+                    status=CAPTURE_STATUS_NOT_APPLICABLE,
+                    expected_sources=(),
+                    saved_sources=(),
+                    failed_sources=(),
+                    error=None,
+                )
                 if cp.kind == "checkpoint" and cp.capture_sources:
-                    self._capture_at_checkpoint(cp)
+                    capture_summary = self._capture_at_checkpoint(cp)
 
-                success += 1
+                checkpoint_result = build_checkpoint_result(
+                    name=cp.name,
+                    waypoint_id=cp.waypoint_id,
+                    nav_outcome=result.outcome.value,
+                    capture_status=capture_summary.status,
+                    expected_sources=capture_summary.expected_sources,
+                    saved_sources=capture_summary.saved_sources,
+                    failed_sources=capture_summary.failed_sources,
+                    error=capture_summary.error,
+                    started_at=started_at,
+                    finished_at=datetime.now(timezone.utc),
+                )
+                if checkpoint_result.is_complete:
+                    success += 1
                 consecutive_nav_fails = 0
-                with Session() as s:
-                    runs_repo.mark_progress(s, self._run_id, success)
-                    s.commit()
+                self._record_checkpoint_result(checkpoint_result, success)
             except Exception as exc:
                 _log.exception("Checkpoint %s failed: %s", cp.name, exc)
+                checkpoint_result = build_checkpoint_result(
+                    name=cp.name,
+                    waypoint_id=cp.waypoint_id,
+                    nav_outcome="error",
+                    capture_status=CAPTURE_STATUS_NOT_APPLICABLE,
+                    expected_sources=cp.capture_sources if cp.kind == "checkpoint" else (),
+                    saved_sources=(),
+                    failed_sources=(),
+                    error=str(exc),
+                    started_at=started_at,
+                    finished_at=datetime.now(timezone.utc),
+                )
+                self._record_checkpoint_result(checkpoint_result, success)
                 abort_reason = f"exception at {cp.name}: {exc}"
                 continue
 
         final_status = self._classify_final_status(success, total, abort_reason)
+        self._last_run_status = final_status
+        self._last_abort_reason = abort_reason
         with Session() as s:
             runs_repo.finish(
                 s,
@@ -285,30 +364,66 @@ class PlaybackService(QObject):
                 status=final_status,
                 checkpoints_reached=success,
                 abort_reason=abort_reason,
+                checkpoint_results_json=checkpoint_results_to_payload(
+                    self._checkpoint_results
+                ),
             )
             s.commit()
 
-        if final_status in (RunStatus.aborted, RunStatus.failed):
-            self.run_failed.emit(abort_reason or final_status.value)
-        else:
+        if final_status == RunStatus.completed:
             self.run_completed.emit(success, total)
+        else:
+            self.run_failed.emit(abort_reason or final_status.value)
 
         return self._run_id
 
-    def return_home(self, start_wp_id: str) -> None:
+    def return_home(self, start_wp_id: str):
         """Volá return_home utilitu z autonomy."""
         from app.robot.return_home import return_home
 
         self._emit_progress("Návrat domů...")
+        if self._run_id is not None:
+            with Session() as s:
+                runs_repo.set_return_home(
+                    s,
+                    self._run_id,
+                    status=RETURN_HOME_STATUS_IN_PROGRESS,
+                    reason=None,
+                )
+                s.commit()
         try:
-            return_home(
+            result = return_home(
                 self._navigator,
                 start_wp_id,
                 timeout_s=PLAYBACK_RETURN_HOME_TIMEOUT_SEC,
                 progress=self._emit_progress,
             )
+            if self._run_id is not None:
+                with Session() as s:
+                    runs_repo.set_return_home(
+                        s,
+                        self._run_id,
+                        status=(
+                            RETURN_HOME_STATUS_COMPLETED
+                            if result.ok
+                            else RETURN_HOME_STATUS_FAILED
+                        ),
+                        reason=None if result.ok else result.message,
+                    )
+                    s.commit()
+            return result
         except Exception as exc:
+            if self._run_id is not None:
+                with Session() as s:
+                    runs_repo.set_return_home(
+                        s,
+                        self._run_id,
+                        status=RETURN_HOME_STATUS_FAILED,
+                        reason=str(exc),
+                    )
+                    s.commit()
             _log.exception("return_home failed: %s", exc)
+            raise
 
     def cleanup(self) -> None:
         """Smaže temp extrahovanou mapu."""
@@ -506,23 +621,9 @@ class PlaybackService(QObject):
             return
 
         if not meta.start_waypoint_id:
-            # Žádný hint — spadneme na autonomy SPECIFIC_FIDUCIAL bez initial_guess.
-            _log.warning(
-                "Map %s nemá start_waypoint_id — lokalizuji bez hintu (může být mis-lokalizováno).",
-                meta.name,
+            raise RuntimeError(
+                f"Mapa '{meta.name}' nemá start_waypoint_id. Playback ji odmítl spustit."
             )
-            try:
-                self._navigator.localize(
-                    strategy=LocalizationStrategy.SPECIFIC_FIDUCIAL,
-                    fiducial_id=meta.fiducial_id,
-                )
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Lokalizace na mapě '{meta.name}' selhala: "
-                    f"SPECIFIC_FIDUCIAL s id={meta.fiducial_id} nenalezlo "
-                    f"fiducial v kameře Spota ({exc}). Přibliž Spota k fiducialu."
-                ) from exc
-            return
 
         # Hlavní cesta: strict localize s hintem na start_waypoint.
         try:
@@ -537,6 +638,12 @@ class PlaybackService(QObject):
                 f"{meta.fiducial_id}, start={meta.start_waypoint_id}): {exc}. "
                 f"Přibliž Spota k fiducialu a zkus znovu."
             ) from exc
+
+        if localized_wp != meta.start_waypoint_id:
+            raise RuntimeError(
+                "Lokalizace skončila na jiném waypointu než start mapy "
+                f"({localized_wp} != {meta.start_waypoint_id})."
+            )
 
         # Ověření: skončili jsme opravdu blízko startu?
         if localized_wp != meta.start_waypoint_id:
@@ -555,28 +662,37 @@ class PlaybackService(QObject):
             )
 
     def _extract_checkpoints(self, meta: MapMetadata) -> list[CheckpointRef]:
-        data = meta.checkpoints_json or {}
-        items = data.get("checkpoints") or []
-        default_sources = meta.default_capture_sources or []
-        out: list[CheckpointRef] = []
-        for item in items:
-            kind = item.get("kind", "checkpoint")
-            out.append(
-                CheckpointRef(
-                    name=item.get("name", "?"),
-                    waypoint_id=item.get("waypoint_id", ""),
-                    kind=kind,
-                    capture_sources=list(item.get("capture_sources") or default_sources),
-                )
+        plan = parse_checkpoint_plan(
+            meta.checkpoints_json,
+            fallback_map_name=meta.name,
+            fallback_start_waypoint_id=meta.start_waypoint_id,
+            fallback_default_capture_sources=meta.default_capture_sources,
+            fallback_fiducial_id=meta.fiducial_id,
+        )
+        return [
+            CheckpointRef(
+                name=cp.name,
+                waypoint_id=cp.waypoint_id,
+                kind=cp.kind,
+                capture_sources=list(cp.capture_sources),
             )
-        return [c for c in out if c.waypoint_id]
+            for cp in plan.checkpoints
+            if cp.waypoint_id
+        ]
 
-    def _capture_at_checkpoint(self, cp: CheckpointRef) -> None:
+    def _capture_at_checkpoint(self, cp: CheckpointRef) -> CaptureSummary:
         from spot_operator.robot.dual_side_capture import capture_sources
         from spot_operator.services.photo_sink import encode_bgr_to_jpeg
 
+        expected_sources = tuple(cp.capture_sources)
         frames = capture_sources(self._poller, cp.capture_sources)
-        for src, bgr in frames.items():
+        saved_sources: list[str] = []
+        failed_sources: list[str] = []
+        for src in cp.capture_sources:
+            bgr = frames.get(src)
+            if bgr is None:
+                failed_sources.append(src)
+                continue
             try:
                 jpeg, w, h = encode_bgr_to_jpeg(bgr)
                 photo_id = save_photo_to_db(
@@ -588,19 +704,62 @@ class PlaybackService(QObject):
                     height=h,
                 )
                 self.photo_taken.emit(photo_id, src)
+                saved_sources.append(src)
             except Exception as exc:
                 _log.warning("save photo failed (cp=%s src=%s): %s", cp.name, src, exc)
+                failed_sources.append(src)
+
+        if not saved_sources:
+            return CaptureSummary(
+                status=CAPTURE_STATUS_FAILED,
+                expected_sources=expected_sources,
+                saved_sources=(),
+                failed_sources=tuple(failed_sources or expected_sources),
+                error="No photos were saved for this checkpoint.",
+            )
+        if failed_sources:
+            return CaptureSummary(
+                status=CAPTURE_STATUS_PARTIAL,
+                expected_sources=expected_sources,
+                saved_sources=tuple(saved_sources),
+                failed_sources=tuple(failed_sources),
+                error="Only part of the expected photo sources was saved.",
+            )
+        return CaptureSummary(
+            status=CAPTURE_STATUS_OK,
+            expected_sources=expected_sources,
+            saved_sources=tuple(saved_sources),
+            failed_sources=(),
+            error=None,
+        )
 
     def _classify_final_status(
         self, success: int, total: int, abort_reason: Optional[str]
     ) -> RunStatus:
         if abort_reason:
+            if abort_reason == "Aborted by user":
+                return RunStatus.aborted
             if success == 0:
                 return RunStatus.failed
-            return RunStatus.aborted if "Aborted" in abort_reason else RunStatus.partial
+            return RunStatus.partial
         if success == total:
             return RunStatus.completed
         return RunStatus.partial
+
+    def _record_checkpoint_result(
+        self, checkpoint_result: CheckpointResult, success_count: int
+    ) -> None:
+        self._checkpoint_results.append(checkpoint_result)
+        with Session() as s:
+            runs_repo.mark_progress(
+                s,
+                self._run_id,
+                success_count,
+                checkpoint_results_json=checkpoint_results_to_payload(
+                    self._checkpoint_results
+                ),
+            )
+            s.commit()
 
     def _emit_progress(self, text: str) -> None:
         _log.info(text)

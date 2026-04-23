@@ -44,7 +44,7 @@ from spot_operator.constants import (
 from spot_operator.logging_config import get_logger
 from spot_operator.ui.common.dialogs import error_dialog
 from spot_operator.ui.common.estop_floating import EstopFloating
-from spot_operator.ui.common.workers import FunctionWorker
+from spot_operator.ui.common.workers import FunctionWorker, cleanup_worker
 
 _log = get_logger(__name__)
 
@@ -283,6 +283,11 @@ class FiducialPage(QWizardPage):
         except Exception:
             pass
 
+        cleanup_worker(self._worker)
+        self._worker = None
+        cleanup_worker(self._power_worker)
+        self._power_worker = None
+
         # 1) Soft stop velocity (i když není power_on, nepoškodí).
         bundle = self.wizard().bundle() if self.wizard() is not None else None
         if bundle is not None and getattr(bundle, "move_dispatcher", None) is not None:
@@ -455,8 +460,7 @@ class FiducialPage(QWizardPage):
 
         best = observations[0]
         self._detected_id = best.tag_id
-        # Uložíme do wizardu pro pozdější použití (recording ukládá do mapy).
-        self.wizard().setProperty("fiducial_id", best.tag_id)
+        self._store_detected_fiducial(best.tag_id)
 
         if self._required_id is not None and best.tag_id != self._required_id:
             self._status.setText(
@@ -476,6 +480,15 @@ class FiducialPage(QWizardPage):
         self._btn_check.setEnabled(True)
         self._check_progress.setVisible(False)
         self._status.setText(f"<span style='color:#c62828;'>Chyba: {reason}</span>")
+
+    def _store_detected_fiducial(self, fiducial_id: int) -> None:
+        wizard = self.wizard()
+        state_getter = getattr(wizard, "flow_state", None)
+        state = state_getter() if callable(state_getter) else None
+        if state is not None and hasattr(state, "fiducial_id"):
+            state.fiducial_id = fiducial_id
+            return
+        wizard.setProperty("fiducial_id", fiducial_id)
 
     # ---- Keyboard teleop (aktivní jen po power_on) ----
 

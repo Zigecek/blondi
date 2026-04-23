@@ -65,9 +65,34 @@ def delete_for_photo_engine(session: Session, photo_id: int, engine_name: str) -
     return result.rowcount or 0
 
 
+def delete_for_photo(session: Session, photo_id: int) -> int:
+    from sqlalchemy import delete as sqldelete
+
+    result = session.execute(
+        sqldelete(PlateDetection).where(PlateDetection.photo_id == photo_id)
+    )
+    return result.rowcount or 0
+
+
+def delete_for_run(session: Session, run_id: int) -> int:
+    from sqlalchemy import delete as sqldelete
+    from spot_operator.db.models import Photo
+
+    result = session.execute(
+        sqldelete(PlateDetection).where(
+            PlateDetection.photo_id.in_(
+                select(Photo.id).where(Photo.run_id == run_id)
+            )
+        )
+    )
+    return result.rowcount or 0
+
+
 __all__ = [
     "insert_many",
     "list_for_photo",
     "list_by_plate",
     "delete_for_photo_engine",
+    "delete_for_photo",
+    "delete_for_run",
 ]

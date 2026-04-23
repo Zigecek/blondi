@@ -41,6 +41,7 @@ class SpotWizard(QWizard):
         self._bundle_owned: bool = True
         self._estop_callback: Optional[Callable[[], None]] = None
         self._estop_release_callback: Optional[Callable[[], None]] = None
+        self._flow_state: Any | None = None
 
         self.setWindowTitle(window_title)
         self.setWizardStyle(QWizard.ModernStyle)
@@ -72,6 +73,12 @@ class SpotWizard(QWizard):
 
     def bundle(self) -> Any | None:
         return self._bundle
+
+    def set_flow_state(self, state: Any) -> None:
+        self._flow_state = state
+
+    def flow_state(self) -> Any | None:
+        return self._flow_state
 
     def set_estop_callback(
         self,

@@ -138,4 +138,20 @@ class DbQueryWorker(_WorkerBase):
         return (self.ok, self.failed)
 
 
-__all__ = ["FunctionWorker", "DbQueryWorker"]
+def cleanup_worker(
+    worker: _WorkerBase | None, timeout_ms: int = CRUD_WORKER_STOP_TIMEOUT_MS
+) -> None:
+    """Stops a worker thread and detaches late signals safely."""
+    if worker is None:
+        return
+    try:
+        worker.stop_and_wait(timeout_ms=timeout_ms)
+    except Exception as exc:  # pragma: no cover - defensive cleanup path
+        _log.warning("Worker cleanup failed: %s", exc)
+    try:
+        worker.deleteLater()
+    except Exception:
+        pass
+
+
+__all__ = ["FunctionWorker", "DbQueryWorker", "cleanup_worker"]

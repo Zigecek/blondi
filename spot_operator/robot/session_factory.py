@@ -30,6 +30,28 @@ class SpotBundle:
     power: object | None = None  # PowerManager
     move_dispatcher: object | None = None  # MoveCommandDispatcher
 
+    def missing_capabilities(self) -> list[str]:
+        missing: list[str] = []
+        if self.session is None:
+            missing.append("session")
+        if self.estop is None:
+            missing.append("estop")
+        if self.lease is None:
+            missing.append("lease")
+        if self.power is None:
+            missing.append("power")
+        if self.move_dispatcher is None:
+            missing.append("move_dispatcher")
+        return missing
+
+    def ensure_operator_ready(self) -> None:
+        missing = self.missing_capabilities()
+        if not missing:
+            return
+        raise RuntimeError(
+            "Připojení ke Spotovi je neúplné. Chybí: " + ", ".join(missing)
+        )
+
     def disconnect(self) -> None:
         """Uklidí všechny manažery v opačném pořadí než při connect."""
         try:
@@ -55,7 +77,7 @@ class SpotBundle:
             _log.warning("session.disconnect failed: %s", exc)
 
 
-def connect(
+def connect_partial(
     hostname: str,
     username: str,
     password: str,
@@ -155,4 +177,31 @@ def connect(
     return bundle
 
 
-__all__ = ["SpotBundle", "connect"]
+def connect(
+    hostname: str,
+    username: str,
+    password: str,
+    *,
+    with_lease: bool = True,
+    with_estop: bool = True,
+) -> SpotBundle:
+    """Operator-facing connect: requires a fully initialized bundle."""
+    bundle = connect_partial(
+        hostname,
+        username,
+        password,
+        with_lease=with_lease,
+        with_estop=with_estop,
+    )
+    try:
+        bundle.ensure_operator_ready()
+    except Exception:
+        try:
+            bundle.disconnect()
+        except Exception as exc:
+            _log.warning("connect cleanup after partial failure failed: %s", exc)
+        raise
+    return bundle
+
+
+__all__ = ["SpotBundle", "connect", "connect_partial"]

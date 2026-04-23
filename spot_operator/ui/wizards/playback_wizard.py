@@ -21,6 +21,7 @@ from spot_operator.ui.wizards.pages.fiducial_page import FiducialPage
 from spot_operator.ui.wizards.pages.map_select_page import MapSelectPage
 from spot_operator.ui.wizards.pages.playback_result_page import PlaybackResultPage
 from spot_operator.ui.wizards.pages.playback_run_page import PlaybackRunPage
+from spot_operator.ui.wizards.state import PlaybackWizardState
 
 _log = get_logger(__name__)
 
@@ -37,6 +38,7 @@ class PlaybackWizard(SpotWizard):
         bundle: Any | None = None,
     ):
         super().__init__(config, window_title="Spuštění jízdy podle mapy", parent=parent)
+        self.set_flow_state(PlaybackWizardState())
 
         # Pokud volající (MainWindow) dodal už připojený bundle, skipni Connect
         # krok a rovnou začni od výběru mapy. Jinak má wizard vlastní ConnectPage.
@@ -57,6 +59,11 @@ class PlaybackWizard(SpotWizard):
 
         self.currentIdChanged.connect(self._on_page_changed)
 
+    def playback_state(self) -> PlaybackWizardState:
+        state = self.flow_state()
+        assert isinstance(state, PlaybackWizardState)
+        return state
+
     def _populate_props_from_bundle(self, bundle: Any) -> None:
         """Když je bundle dodán externě (MainWindow), ConnectPage se neprojde —
         ale následující stránky (FiducialPage, TeleopRecordPage) potřebují
@@ -67,24 +74,24 @@ class PlaybackWizard(SpotWizard):
 
             poller = ImagePoller(bundle.session)
             sources = poller.list_sources()
-            self.setProperty("available_sources", list(sources))
+            self.playback_state().available_sources = list(sources)
         except Exception as exc:
             _log.warning(
                 "populate_props: list_sources failed (fallback to defaults): %s", exc
             )
-            self.setProperty("available_sources", None)
+            self.playback_state().available_sources = []
         # Spot_ip se snažíme vyčíst z bundle.session (autonomy SDK session).
         ip = getattr(bundle.session, "hostname", None) or getattr(
             bundle.session, "_hostname", None
         )
         if ip:
-            self.setProperty("spot_ip", str(ip))
+            self.playback_state().spot_ip = str(ip)
 
     def _on_page_changed(self, page_id: int) -> None:
         """Vstup na FiducialPage: nastav required_id podle vybrané mapy."""
         page = self.page(page_id)
         if page is self._fiducial_page:
-            required = self.property("selected_fiducial_id")
+            required = self.playback_state().selected_fiducial_id
             if required is not None and int(required) >= 0:
                 self._fiducial_page.set_required_id(int(required))
             else:

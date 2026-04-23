@@ -46,6 +46,11 @@ def build_run_zip(run_id: int) -> tuple[bytes, str]:
             "start_waypoint_id": run.start_waypoint_id,
             "abort_reason": run.abort_reason,
             "notes": run.notes,
+            "checkpoint_results": list(getattr(run, "checkpoint_results_json", []) or []),
+            "return_home": {
+                "status": getattr(run, "return_home_status", "not_requested"),
+                "reason": getattr(run, "return_home_reason", None),
+            },
             "photos": [],
             "exported_at": datetime.now(timezone.utc).isoformat(),
         }

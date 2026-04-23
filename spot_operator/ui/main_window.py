@@ -136,6 +136,7 @@ class MainWindow(QMainWindow):
         self._start_db_ping_timer()
         self._start_temp_cleanup_timer()
         self._update_spot_status()
+        self._update_robot_controls()
 
     # ---- Spot connection lifecycle ----
 
@@ -166,6 +167,7 @@ class MainWindow(QMainWindow):
         self._bundle = dlg.bundle
         _log.info("Spot bundle acquired and held by MainWindow.")
         self._update_spot_status()
+        self._update_robot_controls()
         return True
 
     def _disconnect_spot(self) -> None:
@@ -195,6 +197,7 @@ class MainWindow(QMainWindow):
         self._bundle = None
         _log.info("Spot disconnected (by user).")
         self._update_spot_status()
+        self._update_robot_controls()
 
     def _update_spot_status(self) -> None:
         if self._bundle is None:
@@ -213,6 +216,7 @@ class MainWindow(QMainWindow):
             "padding:4px 8px; font-weight:bold; color:#2e7d32;"
         )
         self._btn_connect_spot.setText("Odpojit Spota")
+        self._btn_connect_spot.setEnabled(not self._has_active_robot_wizard())
 
     def _ensure_bundle(self) -> bool:
         """Wizard helper: pokud není bundle, vynutí ConnectDialog. Vrátí True
@@ -245,6 +249,8 @@ class MainWindow(QMainWindow):
     # ---- Wizard launchers ----
 
     def _start_recording(self) -> None:
+        if not self._ensure_robot_wizard_slot():
+            return
         if not self._ensure_bundle():
             return
         try:
@@ -254,11 +260,14 @@ class MainWindow(QMainWindow):
             wiz.finished.connect(self._on_wizard_closed)
             wiz.showMaximized()
             self._recording_wizard = wiz
+            self._update_robot_controls()
         except Exception as exc:
             _log.exception("Failed to open RecordingWizard: %s", exc)
             error_dialog(self, "Chyba", str(exc))
 
     def _start_playback(self) -> None:
+        if not self._ensure_robot_wizard_slot():
+            return
         if not self._ensure_bundle():
             return
         try:
@@ -271,11 +280,14 @@ class MainWindow(QMainWindow):
             wiz.finished.connect(self._on_wizard_closed)
             wiz.showMaximized()
             self._playback_wizard = wiz
+            self._update_robot_controls()
         except Exception as exc:
             _log.exception("Failed to open PlaybackWizard: %s", exc)
             error_dialog(self, "Chyba", str(exc))
 
     def _start_walk(self) -> None:
+        if not self._ensure_robot_wizard_slot():
+            return
         if not self._ensure_bundle():
             return
         try:
@@ -283,6 +295,7 @@ class MainWindow(QMainWindow):
             wiz.finished.connect(self._on_wizard_closed)
             wiz.showMaximized()
             self._walk_wizard = wiz
+            self._update_robot_controls()
         except Exception as exc:
             _log.exception("Failed to open WalkWizard: %s", exc)
             error_dialog(self, "Chyba", str(exc))
@@ -310,6 +323,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._update_spot_status()
+        self._update_robot_controls()
 
     # ---- DB status polling ----
 
@@ -370,6 +384,35 @@ class MainWindow(QMainWindow):
                 _log.warning("MainWindow close: bundle.disconnect failed: %s", exc)
             self._bundle = None
         super().closeEvent(event)
+
+    def _active_robot_wizard(self) -> QWidget | None:
+        return (
+            self._recording_wizard
+            or self._playback_wizard
+            or self._walk_wizard
+        )
+
+    def _has_active_robot_wizard(self) -> bool:
+        return self._active_robot_wizard() is not None
+
+    def _ensure_robot_wizard_slot(self) -> bool:
+        if not self._has_active_robot_wizard():
+            return True
+        error_dialog(
+            self,
+            "Wizard už běží",
+            "Spot bundle už používá jiný wizard. Nejdřív ho dokonči nebo zavři.",
+        )
+        return False
+
+    def _update_robot_controls(self) -> None:
+        wizard_active = self._has_active_robot_wizard()
+        for btn in (self._btn_play, self._btn_rec, self._btn_walk):
+            btn.setEnabled(not wizard_active)
+        if self._bundle is None:
+            self._btn_connect_spot.setEnabled(not wizard_active)
+        else:
+            self._btn_connect_spot.setEnabled(not wizard_active)
 
     # ---- Utils ----
 

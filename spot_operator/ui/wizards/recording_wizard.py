@@ -19,6 +19,7 @@ from spot_operator.ui.wizards.pages.connect_page import ConnectPage
 from spot_operator.ui.wizards.pages.fiducial_page import FiducialPage
 from spot_operator.ui.wizards.pages.save_map_page import SaveMapPage
 from spot_operator.ui.wizards.pages.teleop_record_page import TeleopRecordPage
+from spot_operator.ui.wizards.state import RecordingWizardState
 
 _log = get_logger(__name__)
 
@@ -34,6 +35,7 @@ class RecordingWizard(SpotWizard):
         bundle: Any | None = None,
     ):
         super().__init__(config, window_title="Nahrávání nové mapy", parent=parent)
+        self.set_flow_state(RecordingWizardState())
 
         if bundle is not None:
             self.set_bundle(bundle, owned=False)
@@ -47,6 +49,11 @@ class RecordingWizard(SpotWizard):
         self.addPage(TeleopRecordPage(parent=self))
         self.addPage(SaveMapPage(config, parent=self))
 
+    def recording_state(self) -> RecordingWizardState:
+        state = self.flow_state()
+        assert isinstance(state, RecordingWizardState)
+        return state
+
     def _populate_props_from_bundle(self, bundle: Any) -> None:
         """Když je bundle dodán externě (MainWindow), ConnectPage se neprojde —
         nastavíme properties manuálně."""
@@ -55,17 +62,17 @@ class RecordingWizard(SpotWizard):
 
             poller = ImagePoller(bundle.session)
             sources = poller.list_sources()
-            self.setProperty("available_sources", list(sources))
+            self.recording_state().available_sources = list(sources)
         except Exception as exc:
             _log.warning(
                 "populate_props: list_sources failed (fallback to defaults): %s", exc
             )
-            self.setProperty("available_sources", None)
+            self.recording_state().available_sources = []
         ip = getattr(bundle.session, "hostname", None) or getattr(
             bundle.session, "_hostname", None
         )
         if ip:
-            self.setProperty("spot_ip", str(ip))
+            self.recording_state().spot_ip = str(ip)
 
     def _should_confirm_close(self) -> bool:
         # Pokud je aktivní recording nebo připojený Spot, zeptej se před zavřením.

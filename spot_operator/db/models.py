@@ -80,6 +80,9 @@ class Map(Base):
     start_waypoint_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     default_capture_sources: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     checkpoints_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    metadata_version: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    archive_is_valid: Mapped[bool] = mapped_column(nullable=False, default=True)
+    archive_validation_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     waypoints_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     checkpoints_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -118,6 +121,13 @@ class SpotRun(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     start_waypoint_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     abort_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checkpoint_results_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    return_home_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="not_requested"
+    )
+    return_home_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     map_ref: Mapped[Map | None] = relationship(back_populates="runs", lazy="select")
     photos: Mapped[list["Photo"]] = relationship(

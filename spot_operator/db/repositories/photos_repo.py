@@ -236,6 +236,19 @@ def list_for_run(session: Session, run_id: int) -> Sequence[Photo]:
     )
 
 
+def list_for_run_light(session: Session, run_id: int) -> Sequence[Photo]:
+    return (
+        session.execute(
+            select(Photo)
+            .options(defer(Photo.image_bytes), selectinload(Photo.detections))
+            .where(Photo.run_id == run_id)
+            .order_by(Photo.captured_at)
+        )
+        .scalars()
+        .all()
+    )
+
+
 def get_last_photo_for_plate(session: Session, plate_text: str) -> Photo | None:
     """Poslední fotka (captured_at DESC), na které OCR detekoval danou SPZ.
 
@@ -308,6 +321,9 @@ def mark_failed(session: Session, photo_id: int) -> None:
 
 def reset_to_pending(session: Session, photo_id: int) -> None:
     """Ruční reset (pro re-OCR tlačítko)."""
+    from spot_operator.db.repositories import detections_repo
+
+    detections_repo.delete_for_photo(session, photo_id)
     session.execute(
         update(Photo)
         .where(Photo.id == photo_id)
@@ -331,6 +347,17 @@ def reset_all_to_pending(
 
     Vrací počet resetovaných řádků.
     """
+    from spot_operator.db.repositories import detections_repo
+
+    photo_ids_stmt = select(Photo.id).where(
+        Photo.ocr_status.in_((OcrStatus.done, OcrStatus.failed))
+    )
+    if run_id is not None:
+        photo_ids_stmt = photo_ids_stmt.where(Photo.run_id == run_id)
+    photo_ids = list(session.execute(photo_ids_stmt).scalars().all())
+    for photo_id in photo_ids:
+        detections_repo.delete_for_photo(session, int(photo_id))
+
     stmt = (
         update(Photo)
         .where(Photo.ocr_status.in_((OcrStatus.done, OcrStatus.failed)))
@@ -382,6 +409,7 @@ __all__ = [
     "get_photo_metadata",
     "fetch_last_image_bytes_for_plate",
     "list_for_run",
+    "list_for_run_light",
     "get_last_photo_for_plate",
     "claim_next_pending",
     "mark_done",

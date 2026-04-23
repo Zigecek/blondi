@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 from spot_operator.constants import UI_SIDE_PANEL_WIDTH
 from spot_operator.logging_config import get_logger
 from spot_operator.services.map_storage import MapMetadata, list_all_metadata
-from spot_operator.ui.common.workers import FunctionWorker
+from spot_operator.ui.common.workers import FunctionWorker, cleanup_worker
 
 _log = get_logger(__name__)
 
@@ -86,6 +86,10 @@ class MapSelectPage(QWizardPage):
     def initializePage(self) -> None:
         self._start_load()
 
+    def cleanupPage(self) -> None:
+        cleanup_worker(self._load_worker)
+        self._load_worker = None
+
     def _start_load(self) -> None:
         """Spustí async načítání seznamu map. UI nezamrzne."""
         self._list.clear()
@@ -131,15 +135,11 @@ class MapSelectPage(QWizardPage):
     def validatePage(self) -> bool:
         if self._selected is None:
             return False
-        self.wizard().setProperty("selected_map_id", self._selected.id)
-        self.wizard().setProperty(
-            "selected_fiducial_id",
-            self._selected.fiducial_id if self._selected.fiducial_id is not None else -1,
-        )
-        self.wizard().setProperty("selected_start_waypoint_id", self._selected.start_waypoint_id or "")
-        self.wizard().setProperty(
-            "selected_capture_sources", list(self._selected.default_capture_sources)
-        )
+        state = self.wizard().playback_state()  # type: ignore[attr-defined]
+        state.selected_map_id = self._selected.id
+        state.selected_fiducial_id = self._selected.fiducial_id
+        state.selected_start_waypoint_id = self._selected.start_waypoint_id
+        state.selected_capture_sources = list(self._selected.default_capture_sources)
         return True
 
     def _on_selection_changed(self) -> None:

@@ -21,8 +21,9 @@ from PySide6.QtWidgets import (
 
 from spot_operator.constants import ROBOT_LOST_ERROR_MARKERS
 from spot_operator.db.engine import Session
-from spot_operator.db.repositories import detections_repo, photos_repo, runs_repo
+from spot_operator.db.repositories import photos_repo, runs_repo
 from spot_operator.logging_config import get_logger
+from spot_operator.services.contracts import parse_checkpoint_results
 from spot_operator.services.zip_exporter import build_run_zip
 from spot_operator.ui.common.dialogs import error_dialog, info_dialog
 
@@ -75,11 +76,8 @@ class PlaybackResultPage(QWizardPage):
         root.addLayout(action_row)
 
     def initializePage(self) -> None:
-        rid = self.wizard().property("completed_run_id")
-        try:
-            self._run_id = int(rid) if rid is not None else None
-        except Exception:
-            self._run_id = None
+        state = self.wizard().playback_state()  # type: ignore[attr-defined]
+        self._run_id = state.completed_run_id
         if self._run_id is None or self._run_id < 0:
             self._summary.setText("<span style='color:#c00;'>Run id nebyl zapsán.</span>")
             return
@@ -94,15 +92,29 @@ class PlaybackResultPage(QWizardPage):
                     f"<span style='color:#c00;'>Run id {self._run_id} není v DB.</span>"
                 )
                 return
-            photos = photos_repo.list_for_run(s, self._run_id)
+            photos = photos_repo.list_for_run_light(s, self._run_id)
+            checkpoint_results = parse_checkpoint_results(
+                getattr(run, "checkpoint_results_json", None) or []
+            )
             abort_reason = getattr(run, "abort_reason", None) or ""
+            partial_count = sum(1 for item in checkpoint_results if not item.is_complete)
             summary_lines = [
                 f"<b>Run:</b> {run.run_code}",
                 f"<b>Mapa:</b> {run.map_name_snapshot or '—'}",
                 f"<b>Stav:</b> {run.status.value}",
                 f"<b>Checkpointů:</b> {run.checkpoints_reached}/{run.checkpoints_total}",
                 f"<b>Fotek:</b> {len(photos)}",
+                f"<b>Dílčí checkpointy:</b> {partial_count}",
             ]
+            if getattr(run, "return_home_status", "not_requested") != "not_requested":
+                summary_lines.append(
+                    f"<b>Návrat domů:</b> {run.return_home_status}"
+                    + (
+                        f" ({run.return_home_reason})"
+                        if getattr(run, "return_home_reason", None)
+                        else ""
+                    )
+                )
             if abort_reason:
                 summary_lines.append(
                     f"<b>Důvod ukončení:</b> <span style='color:#c62828;'>"
@@ -136,7 +148,14 @@ class PlaybackResultPage(QWizardPage):
 
             self._table.setRowCount(len(photos))
             for row, photo in enumerate(photos):
-                detections = detections_repo.list_for_photo(s, photo.id)
+                detections = sorted(
+                    photo.detections,
+                    key=lambda d: (
+                        d.text_confidence is None,
+                        -(d.text_confidence or 0),
+                        -(d.detection_confidence or 0),
+                    ),
+                )
                 plate_text = ", ".join(d.plate_text or "?" for d in detections) or "—"
                 if detections:
                     best = detections[0]

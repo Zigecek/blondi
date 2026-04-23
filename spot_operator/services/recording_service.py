@@ -19,6 +19,13 @@ from typing import Any, Optional
 
 from spot_operator.constants import TEMP_ROOT
 from spot_operator.logging_config import get_logger
+from spot_operator.services.contracts import (
+    CAPTURE_STATUS_FAILED,
+    CAPTURE_STATUS_NOT_APPLICABLE,
+    CAPTURE_STATUS_OK,
+    CAPTURE_STATUS_PARTIAL,
+    build_checkpoint_plan_payload,
+)
 from spot_operator.services.map_storage import save_map_to_db
 
 _log = get_logger(__name__)
@@ -35,6 +42,9 @@ class RecordedCheckpoint:
     photos: list[tuple[str, bytes, int, int]] = field(
         default_factory=list, repr=False
     )
+    capture_status: str = CAPTURE_STATUS_NOT_APPLICABLE
+    saved_sources: list[str] = field(default_factory=list)
+    failed_sources: list[str] = field(default_factory=list)
     note: str = ""
     created_at: str = ""
 
@@ -146,24 +156,52 @@ class RecordingService:
 
         frames = cap_sources(image_poller, sources)
         photos: list[tuple[str, bytes, int, int]] = []
-        for src, bgr in frames.items():
+        saved_sources: list[str] = []
+        failed_sources: list[str] = []
+        for src in sources:
+            bgr = frames.get(src)
+            if bgr is None:
+                failed_sources.append(src)
+                continue
             try:
                 jpeg, w, h = encode_bgr_to_jpeg(bgr, quality=jpeg_quality)
                 photos.append((src, jpeg, w, h))
+                saved_sources.append(src)
             except Exception as exc:
                 _log.warning("Encode failed for source %s: %s", src, exc)
+                failed_sources.append(src)
+
+        kind = "checkpoint"
+        capture_status = CAPTURE_STATUS_OK
+        note = ""
+        if not photos:
+            kind = "waypoint"
+            capture_status = CAPTURE_STATUS_FAILED
+            note = "capture_failed"
+        elif failed_sources:
+            capture_status = CAPTURE_STATUS_PARTIAL
+            note = "capture_partial"
 
         cp = RecordedCheckpoint(
             name=name,
             waypoint_id=wp_id,
-            kind="checkpoint",
+            kind=kind,
             capture_sources=sources,
             photos=photos,
+            capture_status=capture_status,
+            saved_sources=saved_sources,
+            failed_sources=failed_sources,
+            note=note,
             created_at=datetime.now(timezone.utc).isoformat(),
         )
         self._checkpoints.append(cp)
         _log.info(
-            "Checkpoint %s id=%s sources=%s photos=%d", name, wp_id, sources, len(photos)
+            "Checkpoint %s id=%s sources=%s photos=%d status=%s",
+            name,
+            wp_id,
+            sources,
+            len(photos),
+            capture_status,
         )
         return cp
 
@@ -276,26 +314,17 @@ class RecordingService:
         map_name: str,
         effective_fiducial_id: Optional[int] = None,
     ) -> dict:
-        return {
-            "map_name": map_name,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "fiducial_id": effective_fiducial_id
-            if effective_fiducial_id is not None
-            else self._fiducial_id,
-            "start_waypoint_id": self._start_waypoint_id,
-            "default_capture_sources": self._default_capture_sources,
-            "checkpoints": [
-                {
-                    "name": c.name,
-                    "waypoint_id": c.waypoint_id,
-                    "kind": c.kind,
-                    "capture_sources": c.capture_sources,
-                    "note": c.note,
-                    "created_at": c.created_at,
-                }
-                for c in self._checkpoints
-            ],
-        }
+        return build_checkpoint_plan_payload(
+            map_name=map_name,
+            start_waypoint_id=self._start_waypoint_id,
+            fiducial_id=(
+                effective_fiducial_id
+                if effective_fiducial_id is not None
+                else self._fiducial_id
+            ),
+            default_capture_sources=self._default_capture_sources,
+            checkpoints=self._checkpoints,
+        )
 
     # Umožníme wizardu dostat se k seznamu checkpointů (pro counter, seznam).
     @property

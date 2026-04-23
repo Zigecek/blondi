@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from spot_operator.config import AppConfig
 from spot_operator.logging_config import get_logger
 from spot_operator.services import credentials_service, spot_wifi
-from spot_operator.ui.common.workers import FunctionWorker
+from spot_operator.ui.common.workers import FunctionWorker, cleanup_worker
 from spot_operator.ui.wizards.pages.connect_page import _connect_with_wifi_check
 
 _log = get_logger(__name__)
@@ -169,7 +169,15 @@ class ConnectDialog(QDialog):
         if cred_id is None:
             self._password_edit.clear()
             return
-        for cred in credentials_service.list_credentials():
+        try:
+            creds = list(credentials_service.list_credentials())
+        except Exception as exc:
+            _log.warning("profile selection failed: %s", exc)
+            self._status.setText(
+                f"<span style='color:#c62828;'>Nelze načíst profil: {exc}</span>"
+            )
+            return
+        for cred in creds:
             if cred.id == cred_id:
                 self._ip_edit.setText(cred.hostname)
                 self._username_edit.setText(cred.username)
@@ -232,6 +240,11 @@ class ConnectDialog(QDialog):
             )
         except Exception as exc:
             _log.warning("Failed to save credentials: %s", exc)
+
+    def closeEvent(self, event) -> None:  # noqa: D401
+        cleanup_worker(self._worker)
+        self._worker = None
+        super().closeEvent(event)
 
 
 __all__ = ["ConnectDialog"]

@@ -23,7 +23,7 @@ from spot_operator.constants import MAP_NAME_REGEX
 from spot_operator.logging_config import get_logger
 from spot_operator.services.recording_service import RecordingService
 from spot_operator.ui.common.dialogs import error_dialog, info_dialog
-from spot_operator.ui.common.workers import FunctionWorker
+from spot_operator.ui.common.workers import FunctionWorker, cleanup_worker
 
 _log = get_logger(__name__)
 
@@ -94,6 +94,10 @@ class SaveMapPage(QWizardPage):
     def initializePage(self) -> None:
         self._update_ok_state()
 
+    def cleanupPage(self) -> None:
+        cleanup_worker(self._worker)
+        self._worker = None
+
     def isComplete(self) -> bool:
         return self._saved_map_id is not None
 
@@ -130,7 +134,8 @@ class SaveMapPage(QWizardPage):
 
         from app.robot.fiducial_check import visible_fiducials
 
-        required_id = self.wizard().property("fiducial_id")
+        state = self.wizard().recording_state()  # type: ignore[attr-defined]
+        required_id = state.fiducial_id
         worker = FunctionWorker(
             visible_fiducials,
             bundle.session,
@@ -170,7 +175,8 @@ class SaveMapPage(QWizardPage):
         # RecordingService si TeleopRecordPage při svém initializePage uložila
         # do wizard property "recording_service" — sdílený kanál místo
         # iterování všech stránek (brittle při refaktoru pořadí).
-        service: Optional[RecordingService] = self.wizard().property("recording_service")
+        state = self.wizard().recording_state()  # type: ignore[attr-defined]
+        service: Optional[RecordingService] = state.recording_service
         if service is None or not service.is_recording:
             error_dialog(self, "Chyba", "Recording service není aktivní.")
             return
@@ -183,7 +189,7 @@ class SaveMapPage(QWizardPage):
         self._progress.setVisible(True)
         self._save_status.setText("<i>Ukládám mapu do databáze...</i>")
 
-        end_fid = self.wizard().property("fiducial_id")
+        end_fid = state.fiducial_id
         self._worker = FunctionWorker(
             service.stop_and_archive_to_db,
             map_name=name,
@@ -198,6 +204,9 @@ class SaveMapPage(QWizardPage):
     def _on_save_ok(self, map_id) -> None:  # noqa: ANN001
         self._progress.setVisible(False)
         self._saved_map_id = int(map_id)
+        state = self.wizard().recording_state()  # type: ignore[attr-defined]
+        state.saved_map_id = self._saved_map_id
+        state.recording_service = None
         self._save_status.setText(
             f"<span style='color:#2e7d32;'>✓ Mapa uložena (id={map_id}).</span>"
         )

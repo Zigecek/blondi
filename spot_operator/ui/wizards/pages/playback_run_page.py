@@ -20,11 +20,23 @@ from PySide6.QtWidgets import (
 
 from spot_operator.config import AppConfig
 from spot_operator.constants import CAMERA_FRONT_COMPOSITE, UI_SIDE_PANEL_WIDTH
+from spot_operator.db.enums import RunStatus
 from spot_operator.logging_config import get_logger
 from spot_operator.services.map_storage import MapMetadata
 from spot_operator.services.playback_service import PlaybackService
 from spot_operator.ui.common.dialogs import confirm_dialog, error_dialog
 from spot_operator.ui.common.estop_floating import EstopFloating
+from spot_operator.ui.common.workers import cleanup_worker
+from spot_operator.ui.wizards.state import (
+    WIZARD_LIFECYCLE_ABORTING,
+    WIZARD_LIFECYCLE_COMPLETED,
+    WIZARD_LIFECYCLE_FAILED,
+    WIZARD_LIFECYCLE_PARTIAL,
+    WIZARD_LIFECYCLE_PREPARING,
+    WIZARD_LIFECYCLE_READY,
+    WIZARD_LIFECYCLE_RETURNING,
+    WIZARD_LIFECYCLE_RUNNING,
+)
 
 _log = get_logger(__name__)
 
@@ -52,7 +64,7 @@ class _RunThread(QThread):
 class _ReturnHomeThread(QThread):
     """Thread pro asynchronní return_home."""
 
-    done = Signal()
+    done = Signal(str, str)
 
     def __init__(self, service: PlaybackService, start_wp_id: str):
         super().__init__()
@@ -61,9 +73,10 @@ class _ReturnHomeThread(QThread):
 
     def run(self) -> None:  # noqa: D401
         try:
-            self._service.return_home(self._start_wp_id)
-        finally:
-            self.done.emit()
+            result = self._service.return_home(self._start_wp_id)
+            self.done.emit(result.outcome.value, result.message)
+        except Exception as exc:
+            self.done.emit("error", str(exc))
 
 
 class PlaybackRunPage(QWizardPage):
@@ -88,6 +101,8 @@ class PlaybackRunPage(QWizardPage):
         self._live_view = None
         self._run_id: Optional[int] = None
         self._run_finished = False
+        self._prepare_worker = None
+        self._pending_return_home = False
         # Udržuje stav zda jsme připojili OCR signály (abychom je nepropojili opakovaně).
         self._ocr_signals_connected = False
 
@@ -163,13 +178,20 @@ class PlaybackRunPage(QWizardPage):
         if bundle is None:
             error_dialog(self, "Chyba", "Spot není připojen.")
             return
+        state = wizard.playback_state()  # type: ignore[attr-defined]
+        state.lifecycle = WIZARD_LIFECYCLE_PREPARING
+        state.run_id = None
+        state.completed_run_id = None
+        self._run_id = None
+        self._run_finished = False
+        self._pending_return_home = False
 
         self._service = PlaybackService(bundle)
         self._wire_service_signals()
 
         from spot_operator.ui.common.workers import FunctionWorker
 
-        map_id = wizard.property("selected_map_id")
+        map_id = state.selected_map_id
         if map_id is None:
             error_dialog(self, "Chyba", "Není vybraná mapa.")
             return
@@ -202,6 +224,8 @@ class PlaybackRunPage(QWizardPage):
     def _teardown(self) -> None:
         """Bezpečně uklidí run thread, return home thread, image pipeline a
         floating E-Stop widget. Idempotentní."""
+        cleanup_worker(self._prepare_worker)
+        self._prepare_worker = None
         # 1) Pokud běží autonomní run, požádej o přerušení a počkej.
         if self._run_thread is not None and self._run_thread.isRunning():
             try:
@@ -266,11 +290,13 @@ class PlaybackRunPage(QWizardPage):
         self._progress.setVisible(False)
         self._btn_start.setEnabled(True)
         self._status_label.setText("Mapa nahraná a lokalizováno. Klikni START.")
+        self.wizard().playback_state().lifecycle = WIZARD_LIFECYCLE_READY  # type: ignore[attr-defined]
 
     def _on_prepare_failed(self, reason: str) -> None:
         self._progress.setVisible(False)
         self._btn_start.setEnabled(False)
         self._status_label.setText(f"❌ Příprava selhala: {reason}")
+        self.wizard().playback_state().lifecycle = WIZARD_LIFECYCLE_FAILED  # type: ignore[attr-defined]
         error_dialog(self, "Chyba", f"Nelze připravit mapu: {reason}")
 
     def _on_start(self) -> None:
@@ -281,6 +307,8 @@ class PlaybackRunPage(QWizardPage):
         self._progress.setVisible(True)
         self._progress.setRange(0, self._meta.checkpoints_count or 0)
         self._progress.setValue(0)
+        self._btn_next.setEnabled(False)
+        self.wizard().playback_state().lifecycle = WIZARD_LIFECYCLE_RUNNING  # type: ignore[attr-defined]
 
         operator = self._config.operator_label or None
         self._run_thread = _RunThread(self._service, self._meta, operator)
@@ -302,34 +330,46 @@ class PlaybackRunPage(QWizardPage):
         if not start_wp:
             error_dialog(self, "Chyba", "Nemáme start_waypoint_id, návrat domů nelze spustit.")
             return
+        self._pending_return_home = True
+        self.wizard().playback_state().lifecycle = WIZARD_LIFECYCLE_ABORTING  # type: ignore[attr-defined]
         self._service.request_abort()
-        self._return_home_thread = _ReturnHomeThread(self._service, start_wp)
-        self._return_home_thread.done.connect(self._on_return_home_done)
-        self._return_home_thread.start()
         self._btn_stop_return.setEnabled(False)
-        self._append_log("Přerušuji běh, návrat domů...")
+        self._status_label.setText("⚠ Přerušuji běh… po zastavení spouštím návrat domů.")
+        self._append_log("Přerušuji běh… čekám na bezpečné zastavení runu.")
 
-    def _on_return_home_done(self) -> None:
-        self._append_log("Návrat domů dokončen.")
+    def _on_return_home_done(self, outcome: str, reason: str) -> None:
+        if outcome == "reached":
+            self._append_log("Návrat domů dokončen.")
+        else:
+            self._append_log(f"Návrat domů selhal: {reason}")
         self._btn_stop_return.setEnabled(True)
+        self._finish_page_state()
 
     def _on_run_finished(self, run_id: int) -> None:
         self._run_id = run_id
-        self._run_finished = True
-        self.wizard().setProperty("completed_run_id", run_id)
-        self._status_label.setText("✓ Jízda dokončena.")
-        self._btn_next.setEnabled(True)
-        self._btn_stop_return.setVisible(False)
-        self.completeChanged.emit()
+        state = self.wizard().playback_state()  # type: ignore[attr-defined]
+        state.run_id = run_id
+        state.completed_run_id = run_id
+        if self._pending_return_home and self._meta is not None and self._meta.start_waypoint_id:
+            self._status_label.setText("⏳ Run zastaven. Probíhá návrat domů…")
+            state.lifecycle = WIZARD_LIFECYCLE_RETURNING
+            self._append_log("Run zastaven. Spouštím návrat domů.")
+            self._return_home_thread = _ReturnHomeThread(
+                self._service, self._meta.start_waypoint_id
+            )
+            self._return_home_thread.done.connect(self._on_return_home_done)
+            self._return_home_thread.start()
+            return
+        self._finish_page_state()
 
     def _on_run_failed(self, reason: str) -> None:
-        self._run_finished = True
-        self.wizard().setProperty(
-            "completed_run_id", self._run_id if self._run_id is not None else -1
-        )
+        state = self.wizard().playback_state()  # type: ignore[attr-defined]
+        state.completed_run_id = self._run_id
+        state.lifecycle = WIZARD_LIFECYCLE_FAILED
         self._status_label.setText(f"⚠ Jízda skončila s chybou: {reason}")
-        self._btn_next.setEnabled(True)
         self._btn_stop_return.setVisible(False)
+        self._btn_next.setEnabled(self._run_id is not None)
+        self._run_finished = True
         self.completeChanged.emit()
 
     def _go_next(self) -> None:
@@ -343,7 +383,7 @@ class PlaybackRunPage(QWizardPage):
         if self._service is None:
             return
         self._service.progress.connect(self._append_log)
-        self._service.run_started.connect(lambda rid: self._append_log(f"▶ Run id={rid}"))
+        self._service.run_started.connect(self._on_run_started)
         self._service.checkpoint_reached.connect(
             lambda idx, total, name: self._on_progress(idx, total, name)
         )
@@ -459,6 +499,37 @@ class PlaybackRunPage(QWizardPage):
                 self._service.request_abort()
             except Exception as exc:
                 _log.warning("playback request_abort after estop release: %s", exc)
+
+    def _on_run_started(self, run_id: int) -> None:
+        self._run_id = run_id
+        state = self.wizard().playback_state()  # type: ignore[attr-defined]
+        state.run_id = run_id
+        self._append_log(f"▶ Run id={run_id}")
+
+    def _finish_page_state(self) -> None:
+        if self._service is None:
+            return
+        status = self._service.last_run_status or RunStatus.failed
+        state = self.wizard().playback_state()  # type: ignore[attr-defined]
+        state.completed_run_id = self._run_id
+        if status == RunStatus.completed:
+            state.lifecycle = WIZARD_LIFECYCLE_COMPLETED
+            self._status_label.setText("✓ Jízda dokončena.")
+        elif status == RunStatus.partial:
+            state.lifecycle = WIZARD_LIFECYCLE_PARTIAL
+            self._status_label.setText("⚠ Jízda dokončena jen částečně.")
+        elif status == RunStatus.aborted:
+            state.lifecycle = WIZARD_LIFECYCLE_PARTIAL
+            self._status_label.setText("⚠ Jízda byla přerušena operátorem.")
+        else:
+            state.lifecycle = WIZARD_LIFECYCLE_FAILED
+            self._status_label.setText(
+                f"⚠ Jízda skončila stavem: {status.value}"
+            )
+        self._run_finished = True
+        self._btn_next.setEnabled(self._run_id is not None)
+        self._btn_stop_return.setVisible(False)
+        self.completeChanged.emit()
 
 
 __all__ = ["PlaybackRunPage"]

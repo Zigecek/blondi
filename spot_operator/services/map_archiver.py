@@ -1,14 +1,19 @@
-"""Zip/extract mapových adresářů + ověření SHA-256.
-
-Funkčně čistý modul — žádné závislosti na DB ani Qt. Testovatelné v izolaci.
-"""
+"""Zip/extract mapových adresářů + ověření SHA-256 a integrity GraphNav archivu."""
 
 from __future__ import annotations
 
 import hashlib
 import io
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
+
+
+@dataclass(frozen=True, slots=True)
+class MapArchiveValidation:
+    waypoint_ids: tuple[str, ...]
+    waypoint_snapshot_ids: tuple[str, ...]
+    edge_snapshot_ids: tuple[str, ...]
 
 
 def zip_map_dir(map_dir: Path) -> tuple[bytes, str]:
@@ -59,8 +64,87 @@ def count_waypoints_in_map_dir(map_dir: Path) -> int | None:
     return sum(1 for p in snapshot_dir.iterdir() if p.is_file())
 
 
+def validate_map_dir(
+    map_dir: Path,
+    *,
+    expected_start_waypoint_id: str | None = None,
+    checkpoint_waypoint_ids: list[str] | tuple[str, ...] = (),
+) -> MapArchiveValidation:
+    """Validates that the GraphNav archive is complete and internally consistent."""
+    from bosdyn.api.graph_nav import map_pb2
+
+    graph_path = map_dir / "graph" / "graph"
+    if not graph_path.is_file():
+        raise FileNotFoundError(f"Graph file not found: {graph_path}")
+
+    graph = map_pb2.Graph()
+    try:
+        graph.ParseFromString(graph_path.read_bytes())
+    except Exception as exc:
+        raise ValueError(f"Graph file is not a valid GraphNav protobuf: {exc}") from exc
+
+    waypoint_ids = [wp.id for wp in graph.waypoints if wp.id]
+    if not waypoint_ids:
+        raise ValueError("Graph archive contains no waypoints.")
+
+    wp_dir = map_dir / "waypoint_snapshots"
+    edge_dir = map_dir / "edge_snapshots"
+    missing_waypoint_snapshots = [
+        wp.snapshot_id
+        for wp in graph.waypoints
+        if wp.snapshot_id and not (wp_dir / wp.snapshot_id).is_file()
+    ]
+    if missing_waypoint_snapshots:
+        raise ValueError(
+            "Missing waypoint snapshots referenced by graph: "
+            + ", ".join(sorted(missing_waypoint_snapshots))
+        )
+
+    missing_edge_snapshots = [
+        edge.snapshot_id
+        for edge in graph.edges
+        if edge.snapshot_id and not (edge_dir / edge.snapshot_id).is_file()
+    ]
+    if missing_edge_snapshots:
+        raise ValueError(
+            "Missing edge snapshots referenced by graph: "
+            + ", ".join(sorted(missing_edge_snapshots))
+        )
+
+    if expected_start_waypoint_id and expected_start_waypoint_id not in waypoint_ids:
+        raise ValueError(
+            "Recorded start_waypoint_id is not present in the graph: "
+            f"{expected_start_waypoint_id}"
+        )
+
+    missing_checkpoint_waypoints = sorted(
+        {
+            waypoint_id
+            for waypoint_id in checkpoint_waypoint_ids
+            if waypoint_id and waypoint_id not in waypoint_ids
+        }
+    )
+    if missing_checkpoint_waypoints:
+        raise ValueError(
+            "Checkpoint waypoint(s) are missing from the graph: "
+            + ", ".join(missing_checkpoint_waypoints)
+        )
+
+    return MapArchiveValidation(
+        waypoint_ids=tuple(waypoint_ids),
+        waypoint_snapshot_ids=tuple(
+            wp.snapshot_id for wp in graph.waypoints if wp.snapshot_id
+        ),
+        edge_snapshot_ids=tuple(
+            edge.snapshot_id for edge in graph.edges if edge.snapshot_id
+        ),
+    )
+
+
 __all__ = [
+    "MapArchiveValidation",
     "zip_map_dir",
     "extract_map_archive",
     "count_waypoints_in_map_dir",
+    "validate_map_dir",
 ]

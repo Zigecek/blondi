@@ -21,6 +21,9 @@ def create(
     start_waypoint_id: str | None,
     default_capture_sources: list[str],
     checkpoints_json: dict[str, Any] | None,
+    metadata_version: int,
+    archive_is_valid: bool,
+    archive_validation_error: str | None,
     waypoints_count: int | None,
     checkpoints_count: int | None,
     note: str | None,
@@ -35,6 +38,9 @@ def create(
         start_waypoint_id=start_waypoint_id,
         default_capture_sources=default_capture_sources,
         checkpoints_json=checkpoints_json,
+        metadata_version=metadata_version,
+        archive_is_valid=archive_is_valid,
+        archive_validation_error=archive_validation_error,
         waypoints_count=waypoints_count,
         checkpoints_count=checkpoints_count,
         note=note,
@@ -77,4 +83,29 @@ def exists_by_name(session: Session, name: str) -> bool:
     ).scalar_one_or_none() is not None
 
 
-__all__ = ["create", "get", "get_by_name", "list_all", "delete", "exists_by_name"]
+def update_validation(
+    session: Session,
+    map_id: int,
+    *,
+    archive_is_valid: bool,
+    archive_validation_error: str | None,
+    metadata_version: int | None = None,
+) -> None:
+    m = session.get(Map, map_id)
+    if m is None:
+        raise KeyError(f"Map {map_id} not found.")
+    m.archive_is_valid = archive_is_valid
+    m.archive_validation_error = archive_validation_error
+    if metadata_version is not None:
+        m.metadata_version = metadata_version
+
+
+__all__ = [
+    "create",
+    "get",
+    "get_by_name",
+    "list_all",
+    "delete",
+    "exists_by_name",
+    "update_validation",
+]
