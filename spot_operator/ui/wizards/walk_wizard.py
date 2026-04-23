@@ -17,6 +17,7 @@ from spot_operator.logging_config import get_logger
 from spot_operator.ui.wizards.base_wizard import SpotWizard
 from spot_operator.ui.wizards.pages.connect_page import ConnectPage
 from spot_operator.ui.wizards.pages.fiducial_page import FiducialPage
+from spot_operator.ui.wizards.state import WalkWizardState
 
 _log = get_logger(__name__)
 
@@ -36,6 +37,8 @@ class WalkWizard(SpotWizard):
         bundle: Any | None = None,
     ):
         super().__init__(config, window_title="Chůze se Spotem", parent=parent)
+        # PR-09 FIND-130: typed state, místo Qt property hacks ve FiducialPage.
+        self.set_flow_state(WalkWizardState())
 
         if bundle is not None:
             self.set_bundle(bundle, owned=False)
@@ -54,27 +57,27 @@ class WalkWizard(SpotWizard):
         self.setOption(QWizard.HaveFinishButtonOnEarlyPages, True)
         self.setButtonText(QWizard.FinishButton, "Zavřít ✓")
 
-    def _populate_props_from_bundle(self, bundle: Any) -> None:
-        try:
-            from app.robot.images import ImagePoller
+    def walk_state(self) -> WalkWizardState:
+        state = self.flow_state()
+        if not isinstance(state, WalkWizardState):
+            raise RuntimeError(
+                f"WalkWizard flow_state je {type(state).__name__}, "
+                "očekáván WalkWizardState."
+            )
+        return state
 
-            poller = ImagePoller(bundle.session)
-            sources = poller.list_sources()
-            self.setProperty("available_sources", list(sources))
-        except Exception as exc:
-            _log.warning("populate_props: list_sources failed: %s", exc)
-            self.setProperty("available_sources", None)
-        ip = getattr(bundle.session, "hostname", None) or getattr(
-            bundle.session, "_hostname", None
-        )
-        if ip:
-            self.setProperty("spot_ip", str(ip))
+    def _populate_props_from_bundle(self, bundle: Any) -> None:
+        """PR-09 FIND-136: sdílený bundle.get_info() helper."""
+        info = bundle.get_info()
+        state = self.walk_state()
+        state.available_sources = list(info.available_sources)
+        if info.hostname:
+            state.spot_ip = info.hostname
 
     def _close_confirmation_message(self) -> str:
-        return (
-            "Chůze se Spotem — po zavření se WASD teleop zastaví a uvolní "
-            "image pipeline. Spot zůstane zapnutý (neodpojuje se)."
-        )
+        from spot_operator.ui.wizards.messages import CLOSE_WARNING_WALK
+
+        return CLOSE_WARNING_WALK
 
 
 __all__ = ["WalkWizard"]

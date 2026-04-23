@@ -45,6 +45,16 @@ def _teardown_with_timeout(name: str, fn: Callable[[], None], timeout_s: float) 
             _log.warning("Disconnect krok %r selhal: %s", name, exc)
 
 
+@dataclass(frozen=True, slots=True)
+class BundleInfo:
+    """Meta o bundle pro UI populate — centralizovaný output
+    ``SpotBundle.get_info`` (PR-09 FIND-136).
+    """
+
+    hostname: str | None
+    available_sources: list[str]
+
+
 @dataclass(slots=True)
 class SpotBundle:
     """Seskupení všech aktivních manažerů pro Spot robota.
@@ -80,6 +90,27 @@ class SpotBundle:
         raise RuntimeError(
             "Připojení ke Spotovi je neúplné. Chybí: " + ", ".join(missing)
         )
+
+    def get_info(self) -> BundleInfo:
+        """Vrátí metadata bundle (hostname + available image sources).
+
+        Deduplikuje populate-props logiku ze všech 3 wizardů
+        (PR-09 FIND-136).
+        """
+        hostname = getattr(self.session, "hostname", None) or getattr(
+            self.session, "_hostname", None
+        )
+        hostname_s: str | None = str(hostname) if hostname else None
+
+        available: list[str] = []
+        try:
+            from app.robot.images import ImagePoller
+
+            poller = ImagePoller(self.session)
+            available = list(poller.list_sources())
+        except Exception as exc:
+            _log.warning("get_info: list_sources failed: %s", exc)
+        return BundleInfo(hostname=hostname_s, available_sources=available)
 
     def disconnect(self) -> None:
         """Uklidí všechny manažery v opačném pořadí než při connect.

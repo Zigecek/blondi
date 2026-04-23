@@ -34,12 +34,38 @@ class PlaybackWizardState:
     spot_ip: str | None = None
     available_sources: list[str] = field(default_factory=list)
     selected_map_id: int | None = None
-    selected_fiducial_id: int | None = None
+    selected_fiducial_id: int | None = None  # required ID z vybrané mapy
     selected_start_waypoint_id: str | None = None
     selected_capture_sources: list[str] = field(default_factory=list)
-    fiducial_id: int | None = None
+    # PR-09 FIND-132: renamed z `fiducial_id` — nyní jednoznačně
+    # "aktuálně detekovaný fiducial z FiducialPage" (na rozdíl od
+    # `selected_fiducial_id` = required ID z mapy).
+    detected_fiducial_id: int | None = None
     run_id: int | None = None
     completed_run_id: int | None = None
+    lifecycle: str = WIZARD_LIFECYCLE_PREPARING
+
+    # Zpětná kompatibilita pro kód, který ještě čte `fiducial_id`.
+    # Odstranit v PR-15 po kompletním přejmenování callsites.
+    @property
+    def fiducial_id(self) -> int | None:
+        return self.detected_fiducial_id
+
+    @fiducial_id.setter
+    def fiducial_id(self, value: int | None) -> None:
+        self.detected_fiducial_id = value
+
+
+@dataclass(slots=True)
+class WalkWizardState:
+    """Stav pro Walk wizard — samostatný typ aby fiducial_page.py měla
+    konzistentní API ``wizard.flow_state()`` jako recording/playback
+    (PR-09 FIND-130).
+    """
+
+    spot_ip: str | None = None
+    available_sources: list[str] = field(default_factory=list)
+    fiducial_id: int | None = None
     lifecycle: str = WIZARD_LIFECYCLE_PREPARING
 
 
@@ -54,4 +80,5 @@ __all__ = [
     "WIZARD_LIFECYCLE_FAILED",
     "RecordingWizardState",
     "PlaybackWizardState",
+    "WalkWizardState",
 ]

@@ -229,7 +229,7 @@ def build_checkpoint_result(
     *,
     name: str,
     waypoint_id: str,
-    nav_outcome: str,
+    nav_outcome: Any,
     capture_status: str,
     expected_sources: Sequence[str],
     saved_sources: Sequence[str],
@@ -238,10 +238,20 @@ def build_checkpoint_result(
     started_at: datetime,
     finished_at: datetime,
 ) -> CheckpointResult:
+    """Vytvoří CheckpointResult. PR-09 FIND-046: ``nav_outcome`` může být
+    string nebo enum s ``.value`` atributem — normalizujeme na lowercase
+    string pro konzistentní ``is_complete`` check.
+    """
+    # Normalizace enum / string → value.
+    if hasattr(nav_outcome, "value"):
+        nav_outcome_str = str(nav_outcome.value)
+    else:
+        nav_outcome_str = str(nav_outcome)
+    nav_outcome_str = nav_outcome_str.strip().lower()
     return CheckpointResult(
         name=name,
         waypoint_id=waypoint_id,
-        nav_outcome=nav_outcome,
+        nav_outcome=nav_outcome_str,
         capture_status=capture_status,
         expected_sources=tuple(expected_sources),
         saved_sources=tuple(saved_sources),

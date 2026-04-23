@@ -51,38 +51,33 @@ class RecordingWizard(SpotWizard):
 
     def recording_state(self) -> RecordingWizardState:
         state = self.flow_state()
-        assert isinstance(state, RecordingWizardState)
+        # PR-09 FIND-131: raise místo assert (v `python -O` mode by assert skipl
+        # a volající by dostal AttributeError někde dál).
+        if not isinstance(state, RecordingWizardState):
+            raise RuntimeError(
+                f"RecordingWizard flow_state je {type(state).__name__}, "
+                "očekáván RecordingWizardState — inicializace wizardu byla přeskočena?"
+            )
         return state
 
     def _populate_props_from_bundle(self, bundle: Any) -> None:
         """Když je bundle dodán externě (MainWindow), ConnectPage se neprojde —
-        nastavíme properties manuálně."""
-        try:
-            from app.robot.images import ImagePoller
-
-            poller = ImagePoller(bundle.session)
-            sources = poller.list_sources()
-            self.recording_state().available_sources = list(sources)
-        except Exception as exc:
-            _log.warning(
-                "populate_props: list_sources failed (fallback to defaults): %s", exc
-            )
-            self.recording_state().available_sources = []
-        ip = getattr(bundle.session, "hostname", None) or getattr(
-            bundle.session, "_hostname", None
-        )
-        if ip:
-            self.recording_state().spot_ip = str(ip)
+        nastavíme properties manuálně. PR-09 FIND-136: sdílený helper.
+        """
+        info = bundle.get_info()
+        state = self.recording_state()
+        state.available_sources = list(info.available_sources)
+        if info.hostname:
+            state.spot_ip = info.hostname
 
     def _should_confirm_close(self) -> bool:
         # Pokud je aktivní recording nebo připojený Spot, zeptej se před zavřením.
         return super()._should_confirm_close()
 
     def _close_confirmation_message(self) -> str:
-        return (
-            "Nahrávání probíhá. Po zavření se nahrávka zruší a nic se "
-            "neuloží do databáze. Pokračovat?"
-        )
+        from spot_operator.ui.wizards.messages import CLOSE_WARNING_RECORDING
+
+        return CLOSE_WARNING_RECORDING
 
 
 __all__ = ["RecordingWizard"]

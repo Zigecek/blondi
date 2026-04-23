@@ -61,31 +61,21 @@ class PlaybackWizard(SpotWizard):
 
     def playback_state(self) -> PlaybackWizardState:
         state = self.flow_state()
-        assert isinstance(state, PlaybackWizardState)
+        # PR-09 FIND-131: raise místo assert.
+        if not isinstance(state, PlaybackWizardState):
+            raise RuntimeError(
+                f"PlaybackWizard flow_state je {type(state).__name__}, "
+                "očekáván PlaybackWizardState — inicializace wizardu byla přeskočena?"
+            )
         return state
 
     def _populate_props_from_bundle(self, bundle: Any) -> None:
-        """Když je bundle dodán externě (MainWindow), ConnectPage se neprojde —
-        ale následující stránky (FiducialPage, TeleopRecordPage) potřebují
-        wizard properties `spot_ip` a `available_sources` které ConnectPage
-        jinak nastavuje. Doplníme je tady."""
-        try:
-            from app.robot.images import ImagePoller
-
-            poller = ImagePoller(bundle.session)
-            sources = poller.list_sources()
-            self.playback_state().available_sources = list(sources)
-        except Exception as exc:
-            _log.warning(
-                "populate_props: list_sources failed (fallback to defaults): %s", exc
-            )
-            self.playback_state().available_sources = []
-        # Spot_ip se snažíme vyčíst z bundle.session (autonomy SDK session).
-        ip = getattr(bundle.session, "hostname", None) or getattr(
-            bundle.session, "_hostname", None
-        )
-        if ip:
-            self.playback_state().spot_ip = str(ip)
+        """PR-09 FIND-136: sdílený bundle.get_info() helper."""
+        info = bundle.get_info()
+        state = self.playback_state()
+        state.available_sources = list(info.available_sources)
+        if info.hostname:
+            state.spot_ip = info.hostname
 
     def _on_page_changed(self, page_id: int) -> None:
         """Vstup na FiducialPage: nastav required_id podle vybrané mapy."""
@@ -98,10 +88,9 @@ class PlaybackWizard(SpotWizard):
                 self._fiducial_page.set_required_id(None)
 
     def _close_confirmation_message(self) -> str:
-        return (
-            "Autonomní jízda probíhá nebo máš aktivní spojení se Spotem. "
-            "Po zavření se vše ukončí. Pokračovat?"
-        )
+        from spot_operator.ui.wizards.messages import CLOSE_WARNING_PLAYBACK
+
+        return CLOSE_WARNING_PLAYBACK
 
 
 __all__ = ["PlaybackWizard"]

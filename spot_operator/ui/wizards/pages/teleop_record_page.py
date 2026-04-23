@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeyEvent, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
@@ -45,8 +45,6 @@ _log = get_logger(__name__)
 
 class TeleopRecordPage(QWizardPage):
     """Jádro recording wizardu. Auto-start nahrávání + WASD + tlačítka fotek."""
-
-    recording_finished = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -647,9 +645,8 @@ class TeleopRecordPage(QWizardPage):
             ):
                 return
         self._send_velocity(0, 0, 0)
-        # Signalizuje wizardu, že je čas přejít na save page.
-        self.recording_finished.emit()
-        # Next tlačítko kliknutí vyvoláme programaticky:
+        # PR-09 FIND-150: odstraněn dead recording_finished signál — wizard
+        # pokračuje přes next() + QWizardPage.isComplete lifecycle.
         self.wizard().next()
 
     # ---- Helpers ----
@@ -705,9 +702,14 @@ class TeleopRecordPage(QWizardPage):
         if bundle is None:
             return
         try:
-            from app.robot.health import HealthMonitor
+            # PR-09 FIND-151: cache HealthMonitor instance (konstruktor ~ly levný,
+            # ale opakovaný alloc na každý 5s tick je zbytečný).
+            hm = getattr(self, "_health_monitor", None)
+            if hm is None:
+                from app.robot.health import HealthMonitor
 
-            hm = HealthMonitor(bundle.session)
+                hm = HealthMonitor(bundle.session)
+                self._health_monitor = hm
             pct = hm.get_battery_percentage()
             self._battery.setText(f"Baterie: {pct:.0f} %")
             if pct < 15:

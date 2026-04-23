@@ -51,7 +51,9 @@ class SpotWizard(QWizard):
         self.setMinimumSize(UI_WIZARD_MIN_WIDTH, UI_WIZARD_MIN_HEIGHT)
 
         self._f1_shortcut = QShortcut(QKeySequence("F1"), self)
-        self._f1_shortcut.setContext(Qt.ApplicationShortcut)
+        # PR-09 FIND-137: WindowShortcut místo ApplicationShortcut, aby F1
+        # v jiném okně (CRUD) neaktivovalo E-Stop.
+        self._f1_shortcut.setContext(Qt.WindowShortcut)
         self._f1_shortcut.activated.connect(self.trigger_estop)
 
         self.setButtonText(QWizard.NextButton, "Další ▶")
@@ -145,15 +147,19 @@ class SpotWizard(QWizard):
 
     # ---- Cleanup / close ----
 
-    def safe_abort(self) -> None:
+    def safe_abort(self) -> bool:
         """Uvolní všechny prostředky. Voláno při zavření wizardu nebo chybě.
 
-        Pořadí je důležité:
+        Vrací True pokud cleanup proběhl bez chyb, False jinak (PR-09 FIND-135
+        — closeEvent může podle toho rozhodnout).
+
+        Pořadí:
           1. Teardown aktuální stránky (zastaví image pipeline, run threads,
              skryje E-Stop widget, abortuje recording service). Qt nevolá
              `cleanupPage` při `closeEvent`, proto to musíme zařídit sami.
           2. Disconnect bundle (lease release, estop shutdown, SDK session).
         """
+        ok = True
         # 1) Teardown aktuální stránky (pokud ho implementuje).
         current = self.currentPage()
         if current is not None and hasattr(current, "_teardown"):
@@ -161,6 +167,7 @@ class SpotWizard(QWizard):
                 current._teardown()
             except Exception as exc:
                 _log.exception("Page _teardown failed: %s", exc)
+                ok = False
 
         # 2) Disconnect bundle — JEN pokud ho wizard vlastní. Externí bundle
         # z MainWindow má svůj vlastní lifecycle (sdílený napříč wizardy).
@@ -170,12 +177,14 @@ class SpotWizard(QWizard):
                     self._bundle.disconnect()
                 except Exception as exc:
                     _log.exception("bundle.disconnect failed: %s", exc)
+                    ok = False
                 self._bundle = None
             else:
                 _log.info(
                     "Wizard close: externí bundle ponecháván pro MainWindow."
                 )
                 self._bundle = None
+        return ok
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: D401
         if self._should_confirm_close():
@@ -187,12 +196,51 @@ class SpotWizard(QWizard):
             ):
                 event.ignore()
                 return
-        self.safe_abort()
+        ok = self.safe_abort()
+        if not ok:
+            # PR-09 FIND-135: pokud cleanup selhal, nabídnout retry /
+            # force close. User rozhodne — nechceme silent leak.
+            from spot_operator.ui.wizards.messages import (
+                CLEANUP_FAILED_MESSAGE,
+                CLEANUP_FAILED_TITLE,
+            )
+
+            if not confirm_dialog(
+                self,
+                CLEANUP_FAILED_TITLE,
+                CLEANUP_FAILED_MESSAGE,
+                destructive=True,
+            ):
+                event.ignore()
+                return
         event.accept()
 
     def _should_confirm_close(self) -> bool:
-        """Override v subclassech — True pokud je probíhá kritická fáze."""
-        return self._bundle is not None
+        """Override v subclassech — True pokud probíhá kritická fáze.
+
+        PR-09 FIND-133: confirm dialog jen při RUNNING/ABORTING/RETURNING
+        lifecycle, ne vždy když bundle existuje. User otevře wizard,
+        klikne X → žádné zbytečné "Opravdu zavřít?" na prázdné stránce.
+        """
+        from spot_operator.ui.wizards.state import (
+            WIZARD_LIFECYCLE_ABORTING,
+            WIZARD_LIFECYCLE_RETURNING,
+            WIZARD_LIFECYCLE_RUNNING,
+        )
+
+        state = self._flow_state
+        lifecycle = getattr(state, "lifecycle", None)
+        if lifecycle in {
+            WIZARD_LIFECYCLE_RUNNING,
+            WIZARD_LIFECYCLE_ABORTING,
+            WIZARD_LIFECYCLE_RETURNING,
+        }:
+            return True
+        # Recording má vlastní sémantiku — is_recording flag na service.
+        service = getattr(state, "recording_service", None)
+        if service is not None and getattr(service, "is_recording", False):
+            return True
+        return False
 
     def _close_confirmation_message(self) -> str:
         return (
