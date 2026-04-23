@@ -1,4 +1,4 @@
-"""Krok 5 recordingu: WASD teleop + fotky + waypointy + live view."""
+"""Krok 4 recordingu: WASD teleop + fotky + waypointy + live view."""
 
 from __future__ import annotations
 
@@ -18,11 +18,19 @@ from PySide6.QtWidgets import (
     QWizardPage,
 )
 
-from spot_operator.constants import CAMERA_LEFT, CAMERA_RIGHT
+from spot_operator.constants import (
+    CAMERA_FRONT_COMPOSITE,
+    CAMERA_LEFT,
+    CAMERA_RIGHT,
+    PREFERRED_LEFT_CANDIDATES,
+    PREFERRED_RIGHT_CANDIDATES,
+    pick_side_source,
+)
 from spot_operator.logging_config import get_logger
 from spot_operator.services.recording_service import RecordingService
 from spot_operator.ui.common.dialogs import confirm_dialog, error_dialog
 from spot_operator.ui.common.estop_floating import EstopFloating
+from spot_operator.ui.common.photo_confirm_overlay import PhotoConfirmOverlay
 
 _log = get_logger(__name__)
 
@@ -38,10 +46,10 @@ class TeleopRecordPage(QWizardPage):
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.setTitle("5. Průjezd trasy + focení")
+        self.setTitle("4. Průjezd trasy + focení")
         self.setSubTitle(
-            "Nahrávání běží. Ovládej Spota klávesami WASD, fotit klávesami [ ] P,"
-            " waypoint bez fotky klávesou C."
+            "Nahrávání běží. Ovládej Spota klávesami WASD, fotit klávesami V N B,"
+            " waypoint bez fotky klávesou C. U každého auta si vyber stranu focení."
         )
 
         self._service: Optional[RecordingService] = None
@@ -49,6 +57,21 @@ class TeleopRecordPage(QWizardPage):
         self._image_pipeline = None
         self._live_view = None
         self._keys_pressed: set[int] = set()
+        # Photo confirm overlay — aktivní jen během náhledu před uložením.
+        # None mimo okamžik preview. Tlačítka Foto jsou disabled, když overlay běží.
+        self._current_overlay: Optional[PhotoConfirmOverlay] = None
+        # Konkrétní jména image sources — resolved v initializePage přes
+        # pick_side_source proti wizard.property("available_sources").
+        # Default je hardcoded CAMERA_LEFT/RIGHT jako fallback.
+        self._camera_left: str = CAMERA_LEFT
+        self._camera_right: str = CAMERA_RIGHT
+
+        # Velocity keep-alive timer: Spot SDK velocity commands mají default
+        # end_time ~0.6 s. Bez tick každých ~200 ms by Spot zastavil po 10 cm
+        # i když operátor klávesu pořád drží (viz autonomy _CommandDispatcher).
+        self._velocity_timer = QTimer(self)
+        self._velocity_timer.setInterval(200)
+        self._velocity_timer.timeout.connect(self._on_velocity_tick)
 
         root = QHBoxLayout(self)
 
@@ -87,29 +110,29 @@ class TeleopRecordPage(QWizardPage):
 
         side_layout.addSpacing(12)
 
-        self._btn_photo_left = QPushButton("📷 Foto [levá]   ( [ )")
-        self._btn_photo_left.clicked.connect(lambda: self._capture([CAMERA_LEFT]))
+        self._btn_photo_left = QPushButton("📷 Foto vlevo         (V)")
+        self._btn_photo_left.clicked.connect(self._capture_left)
         side_layout.addWidget(self._btn_photo_left)
 
-        self._btn_photo_right = QPushButton("📷 Foto [pravá]  ( ] )")
-        self._btn_photo_right.clicked.connect(lambda: self._capture([CAMERA_RIGHT]))
+        self._btn_photo_right = QPushButton("📷 Foto vpravo        (N)")
+        self._btn_photo_right.clicked.connect(self._capture_right)
         side_layout.addWidget(self._btn_photo_right)
 
-        self._btn_photo_both = QPushButton("📷 Foto [obě]    ( P )")
-        self._btn_photo_both.clicked.connect(
-            lambda: self._capture([CAMERA_LEFT, CAMERA_RIGHT])
-        )
+        self._btn_photo_both = QPushButton("📷 Foto z obou stran  (B)")
+        self._btn_photo_both.clicked.connect(self._capture_both)
         side_layout.addWidget(self._btn_photo_both)
 
-        self._btn_waypoint = QPushButton("📍 Waypoint        ( C )")
+        self._btn_waypoint = QPushButton("📍 Waypoint           (C)")
         self._btn_waypoint.clicked.connect(self._add_waypoint)
         side_layout.addWidget(self._btn_waypoint)
 
         side_layout.addSpacing(12)
 
         self._hint = QLabel(
-            "<small><b>WASD</b> = pohyb, <b>QE</b> = rotace,<br>"
-            "<b>Mezerník</b> = stop, <b>F1</b> = E-STOP</small>"
+            "<small><b>WASD</b> = pohyb, <b>QE</b> = rotace, "
+            "<b>Mezerník</b> = stop, <b>F1</b> = E-STOP<br>"
+            "<b>V</b> = foto vlevo, <b>N</b> = foto vpravo, "
+            "<b>B</b> = obě strany, <b>C</b> = waypoint</small>"
         )
         self._hint.setTextFormat(Qt.RichText)
         side_layout.addWidget(self._hint)
@@ -139,14 +162,41 @@ class TeleopRecordPage(QWizardPage):
             error_dialog(self, "Chyba", "Není navázané spojení se Spotem.")
             return
 
+        # Auto-resolve konkrétní jména image sources podle toho, co Spot
+        # advertisuje (některé firmwary: `left_fisheye_image`, jiné
+        # `frontleft_fisheye_image`). available_sources ukládá LoginPage do
+        # wizard property po úspěšném connect.
+        available = wizard.property("available_sources") or []
+        if available:
+            self._camera_left = (
+                pick_side_source(available, PREFERRED_LEFT_CANDIDATES) or CAMERA_LEFT
+            )
+            self._camera_right = (
+                pick_side_source(available, PREFERRED_RIGHT_CANDIDATES) or CAMERA_RIGHT
+            )
+            _log.info(
+                "Teleop capture sources: left=%s right=%s",
+                self._camera_left,
+                self._camera_right,
+            )
+        else:
+            _log.warning(
+                "No available_sources from LoginPage; using hardcoded defaults %s, %s",
+                self._camera_left,
+                self._camera_right,
+            )
+
         self._service = RecordingService(bundle)
-        sources = wizard.property("capture_sources") or [CAMERA_LEFT]
         fiducial_id = wizard.property("fiducial_id")
+        # `default_capture_sources` v DB mapě je "obě strany, které tenhle robot
+        # umí" — operátor u jednotlivých checkpointů volí individuálně přes
+        # tlačítka [ ] P.
+        default_sources = [self._camera_left, self._camera_right]
 
         try:
             self._service.start(
                 map_name_prefix="rec",
-                default_capture_sources=list(sources),
+                default_capture_sources=default_sources,
                 fiducial_id=int(fiducial_id) if fiducial_id is not None else None,
             )
         except Exception as exc:
@@ -161,6 +211,9 @@ class TeleopRecordPage(QWizardPage):
         self._ensure_image_pipeline(bundle)
         self._ensure_estop_widget(wizard, bundle)
         self._battery_timer.start()
+        # Velocity keep-alive — Spot už stojí z FiducialPage, takže timer
+        # může běžet rovnou. Tick pošle velocity jen když jsou klávesy drženy.
+        self._velocity_timer.start()
         self.setFocus()
 
     def cleanupPage(self) -> None:
@@ -176,17 +229,31 @@ class TeleopRecordPage(QWizardPage):
         Volat jde opakovaně (idempotentní) — `cleanupPage` + `closeEvent` by
         mohly obě trigger nakonec stejnou cestu.
         """
-        # 1) Zastav poll baterie.
+        # 0) Zavři případný photo confirm overlay.
+        if self._current_overlay is not None:
+            try:
+                self._current_overlay.teardown()
+                self._current_overlay.close()
+                self._current_overlay.deleteLater()
+            except Exception:
+                pass
+            self._current_overlay = None
+
+        # 1) Zastav poll baterie a velocity keep-alive.
         try:
             self._battery_timer.stop()
         except Exception:
             pass
+        try:
+            self._velocity_timer.stop()
+        except Exception:
+            pass
 
-        # 2) Soft stop robot (velocity → 0). Při E-Stopu to neškodí.
+        # 2) Soft stop robot (autonomy dispatcher .stop() pošle velocity 0).
         bundle = self.wizard().bundle() if self.wizard() is not None else None
         if bundle is not None and getattr(bundle, "move_dispatcher", None) is not None:
             try:
-                bundle.move_dispatcher.send(0.0, 0.0, 0.0)
+                bundle.move_dispatcher.stop()
             except Exception as exc:
                 _log.debug("move_dispatcher stop failed during teardown: %s", exc)
 
@@ -226,12 +293,12 @@ class TeleopRecordPage(QWizardPage):
         key = event.key()
         self._keys_pressed.add(key)
 
-        if key == Qt.Key_BracketLeft:
-            self._capture([CAMERA_LEFT])
-        elif key == Qt.Key_BracketRight:
-            self._capture([CAMERA_RIGHT])
-        elif key == Qt.Key_P:
-            self._capture([CAMERA_LEFT, CAMERA_RIGHT])
+        if key == Qt.Key_V:
+            self._capture_left()
+        elif key == Qt.Key_N:
+            self._capture_right()
+        elif key == Qt.Key_B:
+            self._capture_both()
         elif key == Qt.Key_C:
             self._add_waypoint()
         elif key == Qt.Key_Space:
@@ -266,11 +333,121 @@ class TeleopRecordPage(QWizardPage):
         if bundle is None or bundle.move_dispatcher is None:
             return
         try:
-            bundle.move_dispatcher.send(vx, vy, vyaw)
+            # autonomy `MoveCommandDispatcher.send_velocity(vx, vy, vyaw, ...)` —
+            # nevoláme `send()`, ta metoda neexistuje.
+            bundle.move_dispatcher.send_velocity(vx, vy, vyaw)
         except Exception as exc:
-            _log.warning("move send failed: %s", exc)
+            _log.warning("move send_velocity failed: %s", exc)
+
+    def _on_velocity_tick(self) -> None:
+        """Periodický 5 Hz tick — re-publish aktuální velocity pokud klávesy drženy.
+
+        Bez tohoto Spot zastaví po ~0.6 s (default SDK velocity end_time).
+        """
+        if not self._keys_pressed:
+            return
+        self._update_velocity_from_keys()
+
+    # ---- E-Stop release ----
+
+    def _handle_estop_release(self) -> None:
+        """Volá `EstopManager.release()` + abortuje rozpracované nahrávání.
+
+        Po release je Spot vypnutý — recording data jsou neplatná. Operátor
+        je informován a musí wizard zavřít a začít znovu od FiducialPage.
+        """
+        bundle = self.wizard().bundle() if self.wizard() else None
+        if bundle is None or bundle.estop is None:
+            return
+        try:
+            bundle.estop.release()
+            _log.info("E-Stop released during teleop recording")
+        except Exception as exc:
+            _log.exception("E-Stop release failed: %s", exc)
+            raise
+
+        # Recording je ztracené — abort + vyčisti state
+        if self._service is not None and self._service.is_recording:
+            try:
+                self._service.abort()
+            except Exception as exc:
+                _log.warning("RecordingService abort after estop release: %s", exc)
+
+        self._keys_pressed.clear()
+        try:
+            self._velocity_timer.stop()
+        except Exception:
+            pass
+
+        error_dialog(
+            self,
+            "E-Stop uvolněn",
+            "Motory byly vypnuty, nahrávání bylo zrušeno.\n\n"
+            "Zavři wizard a začni znovu od kontroly fiducialu.",
+        )
 
     # ---- Capture / waypoint ----
+
+    def _capture_left(self) -> None:
+        """Slot: tlačítko "Foto vlevo" nebo klávesa V. Otevře preview overlay."""
+        self._show_photo_overlay([self._camera_left])
+
+    def _capture_right(self) -> None:
+        """Slot: tlačítko "Foto vpravo" nebo klávesa N. Otevře preview overlay."""
+        self._show_photo_overlay([self._camera_right])
+
+    def _capture_both(self) -> None:
+        """Slot: tlačítko "Foto z obou stran" nebo klávesa B. Otevře preview overlay."""
+        self._show_photo_overlay([self._camera_left, self._camera_right])
+
+    # ---- Photo confirm overlay lifecycle ----
+
+    def _show_photo_overlay(self, sources: list[str]) -> None:
+        """Otevře non-modal overlay s live preview. Po potvrzení uloží fresh snímek."""
+        if self._current_overlay is not None:
+            return  # už běží preview, ignoruj double-click
+        bundle = self.wizard().bundle()  # type: ignore[attr-defined]
+        if bundle is None:
+            return
+
+        overlay = PhotoConfirmOverlay(bundle, sources, parent=self)
+        overlay.confirmed.connect(self._on_photo_confirmed)
+        overlay.cancelled.connect(self._on_photo_cancelled)
+        # Pozice: centr parent widgetu, 70% šířky, výška podle obsahu.
+        overlay.resize(int(self.width() * 0.7), overlay.sizeHint().height())
+        overlay.move(
+            (self.width() - overlay.width()) // 2,
+            (self.height() - overlay.height()) // 2,
+        )
+        overlay.show()
+        overlay.raise_()
+        self._current_overlay = overlay
+        self._set_photo_buttons_enabled(False)
+
+    def _on_photo_confirmed(self, sources: list) -> None:
+        """Operátor klikl "Vyfotit a uložit" — fresh capture přes service."""
+        self._capture(list(sources))
+        self._close_overlay()
+
+    def _on_photo_cancelled(self) -> None:
+        """Operátor klikl "Zrušit" — žádné uložení, žádný waypoint."""
+        self._close_overlay()
+
+    def _close_overlay(self) -> None:
+        """Uklidí overlay (stop pipelines, hide, deleteLater) a re-enable tlačítka."""
+        if self._current_overlay is not None:
+            try:
+                self._current_overlay.teardown()
+                self._current_overlay.close()
+                self._current_overlay.deleteLater()
+            except Exception as exc:
+                _log.debug("Overlay close failed: %s", exc)
+            self._current_overlay = None
+        self._set_photo_buttons_enabled(True)
+
+    def _set_photo_buttons_enabled(self, enabled: bool) -> None:
+        for btn in (self._btn_photo_left, self._btn_photo_right, self._btn_photo_both):
+            btn.setEnabled(enabled)
 
     def _capture(self, sources: list[str]) -> None:
         if self._service is None:
@@ -334,6 +511,7 @@ class TeleopRecordPage(QWizardPage):
             return
         try:
             from app.image_pipeline import ImagePipeline
+            from app.robot.images import ImagePoller
             from app.ui.live_view_widget import LiveViewWidget
         except Exception as exc:
             _log.warning("ImagePipeline unavailable: %s", exc)
@@ -344,7 +522,15 @@ class TeleopRecordPage(QWizardPage):
         self._live_view = LiveViewWidget(self._live_view_container)
         layout.addWidget(self._live_view)
 
-        self._image_pipeline = ImagePipeline(bundle.session)
+        # POZOR: ImagePipeline v konstruktoru chce `ImagePoller` instanci
+        # (ne session). Sám poller nevlastní — vytvoří si ho z session.
+        poller = ImagePoller(bundle.session)
+        self._image_pipeline = ImagePipeline(poller)
+        # Default source = front_composite (stitched přední obraz) — stejně
+        # jako autonomy. Operátor vidí široký záběr pro WASD teleop. Tlačítka
+        # Foto vlevo/vpravo/obě používají konkrétní single-side source
+        # nezávisle na live view.
+        self._image_pipeline.set_source(CAMERA_FRONT_COMPOSITE)
         self._image_pipeline.set_recording(True)
         self._image_pipeline.frame_ready.connect(self._live_view.update_frame)
         try:
@@ -357,8 +543,13 @@ class TeleopRecordPage(QWizardPage):
             return
         if bundle.estop is None:
             return
-        self._estop_widget = EstopFloating(self, bundle.estop.trigger)
-        wizard.set_estop_callback(bundle.estop.trigger)
+        # Registrujeme oba callbacky — trigger + release (toggle chování).
+        self._estop_widget = EstopFloating(
+            self,
+            on_trigger=bundle.estop.trigger,
+            on_release=self._handle_estop_release,
+        )
+        wizard.set_estop_callback(bundle.estop.trigger, self._handle_estop_release)
         self._estop_widget.show()
 
     def _poll_battery(self) -> None:

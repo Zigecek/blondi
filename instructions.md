@@ -1,6 +1,6 @@
 ---
-version: 1.1.1
-last_updated: 2026-04-22
+version: 1.3.0
+last_updated: 2026-04-23
 next_review: 2026-07-22
 applies_to:
   python: "3.10"
@@ -48,7 +48,7 @@ odkudkoli připojí ke stejné DB a vidí totéž.
 | **Checkpoint** | Waypoint **s přiřazenou fotkou** (nebo více). Pojmenovaný `CP_NNN`. V `maps.checkpoints_json[*]`. |
 | **Fiducial** | AprilTag marker v prostředí (černobílý čtverec). ID je integer (typicky 1–100). Slouží k lokalizaci Spota. |
 | **Run** | Jedno spuštění playbacku mapy. Řádek v `spot_runs`. Unikátní `run_code` (např. `run_20260422_1530`). |
-| **capture_sources** | Seznam jmen Spot image sources (`left_fisheye_image`, ...) pro focení na checkpointu. |
+| **capture_sources** | Per-checkpoint seznam jmen Spot image sources (`left_fisheye_image` / `right_fisheye_image` / oba) použitých pro focení na daném checkpointu. Operátor volí v teleopu individuálně přes klávesy **V / N / B** (vlevo / vpravo / obě) nebo tlačítka. Před uložením se zobrazí `PhotoConfirmOverlay` s live preview. Mapa samotná má v `default_capture_sources` obě strany (fallback pro playback). |
 | **SPZ** | Státní poznávací značka. Česká: 1–8 znaků A–Z + 0–9. V DB `plate_text`. |
 | **Detekce** | Jedna identifikovaná SPZ na fotce jedním OCR engine. Řádek v `plate_detections`. |
 | **Bundle** | `SpotBundle` z `session_factory.connect()` — session + estop + lease + power + move_dispatcher. |

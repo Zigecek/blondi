@@ -1,6 +1,6 @@
 ---
-version: 1.1.1
-last_updated: 2026-04-22
+version: 1.3.0
+last_updated: 2026-04-23
 next_review: 2026-07-22
 applies_to:
   python: "3.10"
@@ -108,14 +108,13 @@ c:\Users\zige\spot\
 │       │   └── workers.py          # FunctionWorker (QThread + signály)
 │       ├── wizards/
 │       │   ├── base_wizard.py      # SpotWizard (F1, close-guard, set_bundle)
-│       │   ├── recording_wizard.py # 6 kroků
+│       │   ├── recording_wizard.py # 5 kroků
 │       │   ├── playback_wizard.py  # 6 kroků
 │       │   └── pages/
-│       │       ├── wifi_page.py             # sdílený: Wi-Fi check
+│       │       ├── wifi_page.py             # sdílený: Wi-Fi check (ping + TCP)
 │       │       ├── login_page.py            # sdílený: login + keyring profily
-│       │       ├── fiducial_page.py         # sdílený: required_id=None|int
-│       │       ├── recording_side_page.py   # levá/pravá/obě
-│       │       ├── teleop_record_page.py    # WASD + fotky + waypointy
+│       │       ├── fiducial_page.py         # sdílený: live view + WASD teleop + power-on + fiducial check
+│       │       ├── teleop_record_page.py    # WASD + per-checkpoint foto vlevo/vpravo/obě + waypointy
 │       │       ├── save_map_page.py         # re-check fiducial + uložit do DB
 │       │       ├── map_select_page.py       # seznam map z DB
 │       │       ├── playback_run_page.py     # START + E-Stop + stop s návratem
@@ -891,7 +890,7 @@ Postupuj po vrstvách. Po každé vrstvě ověř (`python -c "import ..."`, `pyt
 8. **Robot wrappery** — `session_factory.py`, `dual_side_capture.py`.
 9. **ZIP exporter + další services** — `zip_exporter.py`, `spot_wifi.py`, `credentials_service.py`, `recording_service.py`, `playback_service.py`.
 10. **Base wizard + sdílené stránky** — `base_wizard.py`, `estop_floating.py`, `dialogs.py`, `workers.py`, `wifi_page.py`, `login_page.py`, `fiducial_page.py`.
-11. **Recording wizard** — `recording_side_page.py`, `teleop_record_page.py`, `save_map_page.py`, `recording_wizard.py`.
+11. **Recording wizard** (5 kroků) — `teleop_record_page.py`, `save_map_page.py`, `recording_wizard.py`. FiducialPage (krok 3) je sdílená s playbackem.
 12. **Playback wizard** — `map_select_page.py`, `playback_run_page.py`, `playback_result_page.py`, `playback_wizard.py`.
 13. **MainWindow + main.py** — `main_window.py`, `main.py`.
 14. **CRUD modul** — `ui/crud/*`.

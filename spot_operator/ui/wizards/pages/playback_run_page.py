@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from spot_operator.config import AppConfig
+from spot_operator.constants import CAMERA_FRONT_COMPOSITE
 from spot_operator.logging_config import get_logger
 from spot_operator.services.map_storage import MapMetadata
 from spot_operator.services.playback_service import PlaybackService
@@ -394,6 +395,7 @@ class PlaybackRunPage(QWizardPage):
             return
         try:
             from app.image_pipeline import ImagePipeline
+            from app.robot.images import ImagePoller
             from app.ui.live_view_widget import LiveViewWidget
         except Exception as exc:
             _log.warning("ImagePipeline unavailable: %s", exc)
@@ -403,7 +405,13 @@ class PlaybackRunPage(QWizardPage):
         self._live_view = LiveViewWidget(self._live_container)
         layout.addWidget(self._live_view)
 
-        self._image_pipeline = ImagePipeline(bundle.session)
+        # POZOR: ImagePipeline v konstruktoru chce `ImagePoller` instanci
+        # (ne session). Jinak poller.capture() tiše selhá a frame_ready
+        # nikdy nepřijde.
+        poller = ImagePoller(bundle.session)
+        self._image_pipeline = ImagePipeline(poller)
+        # Default source = front_composite (stitched přední obraz).
+        self._image_pipeline.set_source(CAMERA_FRONT_COMPOSITE)
         self._image_pipeline.set_autonomous(True)
         self._image_pipeline.frame_ready.connect(self._live_view.update_frame)
         try:
@@ -416,9 +424,34 @@ class PlaybackRunPage(QWizardPage):
             return
         if bundle.estop is None:
             return
-        self._estop_widget = EstopFloating(self, bundle.estop.trigger)
-        wizard.set_estop_callback(bundle.estop.trigger)
+        self._estop_widget = EstopFloating(
+            self,
+            on_trigger=bundle.estop.trigger,
+            on_release=self._handle_estop_release,
+        )
+        wizard.set_estop_callback(bundle.estop.trigger, self._handle_estop_release)
         self._estop_widget.show()
+
+    def _handle_estop_release(self) -> None:
+        """Uvolni E-Stop a abortuj autonomní běh.
+
+        V playbacku je E-Stop = konec jízdy. Service request_abort + run_thread
+        by dokončí. Pak operátor přejde na result page s `run_failed` stavem.
+        """
+        bundle = self.wizard().bundle() if self.wizard() else None
+        if bundle is None or bundle.estop is None:
+            return
+        try:
+            bundle.estop.release()
+            _log.info("E-Stop released during playback")
+        except Exception as exc:
+            _log.exception("E-Stop release failed: %s", exc)
+            raise
+        if self._service is not None:
+            try:
+                self._service.request_abort()
+            except Exception as exc:
+                _log.warning("playback request_abort after estop release: %s", exc)
 
 
 __all__ = ["PlaybackRunPage"]

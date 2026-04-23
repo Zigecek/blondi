@@ -36,6 +36,7 @@ class SpotWizard(QWizard):
         self._config = config
         self._bundle: Any | None = None
         self._estop_callback: Optional[Callable[[], None]] = None
+        self._estop_release_callback: Optional[Callable[[], None]] = None
 
         self.setWindowTitle(window_title)
         self.setWizardStyle(QWizard.ModernStyle)
@@ -65,24 +66,47 @@ class SpotWizard(QWizard):
     def bundle(self) -> Any | None:
         return self._bundle
 
-    def set_estop_callback(self, callback: Optional[Callable[[], None]]) -> None:
-        self._estop_callback = callback
+    def set_estop_callback(
+        self,
+        on_trigger: Optional[Callable[[], None]],
+        on_release: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Registruje callbacky pro F1 shortcut (alternativa k klikání widgetu).
+
+        `on_trigger` je povinný, `on_release` volitelný (pokud None, F1 v
+        triggered stavu nic neudělá — operátor musí kliknout widget).
+        """
+        self._estop_callback = on_trigger
+        self._estop_release_callback = on_release
 
     def trigger_estop(self) -> None:
-        _log.warning("E-Stop triggered (F1 or button)")
+        """F1 shortcut handler. V triggered stavu = release, jinak = trigger.
+
+        Preferovaně deleguje na floating E-Stop widget aktuální stránky (ten
+        zná svůj stav). Fallback: naše callbacks + bundle.estop přímo.
+        """
+        current = self.currentPage()
+        widget = getattr(current, "_estop_widget", None) if current is not None else None
+
+        # Pokud má stránka vlastní EstopFloating widget, nechme ho rozhodnout.
+        if widget is not None and hasattr(widget, "trigger_from_shortcut"):
+            widget.trigger_from_shortcut()
+            return
+
+        # Fallback: bez widgetu a bez informace o triggered stavu — jen trigger.
+        _log.warning("E-Stop triggered (F1, fallback path)")
         if self._estop_callback is not None:
             try:
                 self._estop_callback()
             except Exception as exc:
                 _log.exception("E-Stop callback failed: %s", exc)
-        else:
-            # Fallback — zkusíme sáhnout na bundle přímo.
-            bundle = self._bundle
-            if bundle is not None and getattr(bundle, "estop", None) is not None:
-                try:
-                    bundle.estop.trigger()
-                except Exception as exc:
-                    _log.exception("EstopManager.trigger failed: %s", exc)
+            return
+        bundle = self._bundle
+        if bundle is not None and getattr(bundle, "estop", None) is not None:
+            try:
+                bundle.estop.trigger()
+            except Exception as exc:
+                _log.exception("EstopManager.trigger failed: %s", exc)
 
     # ---- Cleanup / close ----
 

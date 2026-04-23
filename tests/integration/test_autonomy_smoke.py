@@ -41,7 +41,7 @@ def test_additive_modules_importable() -> None:
 def test_autonomy_core_api_importable() -> None:
     """Klíčové autonomy symboly musí být stále dostupné a mít očekávané metody."""
     from app.models import LocalizationStrategy, NavigationOutcome  # noqa: F401
-    from app.robot.commands import MoveCommandDispatcher, MoveCommandManager  # noqa: F401
+    from app.robot.commands import MoveCommandDispatcher, MoveCommandManager
     from app.robot.estop import EstopManager
     from app.robot.graphnav_navigation import GraphNavNavigator, NavigationResult  # noqa: F401
     from app.robot.graphnav_recording import GraphNavRecorder
@@ -73,8 +73,20 @@ def test_autonomy_core_api_importable() -> None:
         (ImagePoller, "list_sources"),
         (ImagePoller, "capture"),
         (ImagePoller, "capture_many"),
+        # MoveCommandDispatcher API: žádná .start() (thread v __init__),
+        # .send_velocity() nikoli .send(), .shutdown() nikoli .stop() pro lifecycle.
+        (MoveCommandDispatcher, "send_velocity"),
+        (MoveCommandDispatcher, "stop"),       # stop ROBOTA, ne threadu
+        (MoveCommandDispatcher, "shutdown"),   # stop THREADU
     ):
         assert hasattr(cls, method), f"{cls.__name__}.{method} chybí v autonomy"
+
+    # Explicitně ověř, že autonomy v budoucnu NEZAVEDE `.start()` metodu, která by
+    # tiše změnila kontrakt. Pokud by přibyla, máme chtít si o tom rozhodnout.
+    assert not hasattr(MoveCommandDispatcher, "start"), (
+        "MoveCommandDispatcher.start() existuje — spot_operator ji nevolá a nemá "
+        "očekávat; překontroluj session_factory.connect()."
+    )
 
 
 def test_localization_strategy_enum() -> None:

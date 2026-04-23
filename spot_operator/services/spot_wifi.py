@@ -2,6 +2,10 @@
 
 Nepracuje s přepínáním Wi-Fi (to by chtělo admin práva přes netsh wlan). Jen
 ověří, že se k zadané IP dostaneme. Volá se z wizard kroku "Kontrola připojení".
+
+SSID detekce byla v 1.1.1 odstraněna — `netsh wlan show interfaces` vrací SSID
+náhodné Wi-Fi karty (obvykle první v pořadí), což nemusí být ta, přes kterou
+ping jde. Při multi-Wi-Fi setupu to bylo matoucí. Ping + TCP stačí jako důkaz.
 """
 
 from __future__ import annotations
@@ -10,7 +14,6 @@ import socket
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 
 from spot_operator.constants import WIFI_PING_COUNT, WIFI_PING_TIMEOUT_SEC, WIFI_TCP_PORT
 from spot_operator.logging_config import get_logger
@@ -24,7 +27,6 @@ class WifiCheckResult:
     ping_responses: int
     ping_attempts: int
     tcp_reachable: bool
-    current_ssid: str | None
     detail: str = ""
 
     @property
@@ -42,14 +44,12 @@ def check_connection(
     """Provede ping + TCP connect a vrátí souhrnný výsledek."""
     responses = _ping(ip, count=ping_count, timeout_s=ping_timeout_s)
     tcp_ok = _tcp_connect(ip, port=tcp_port, timeout_s=ping_timeout_s)
-    ssid = _current_ssid()
     result = WifiCheckResult(
         ip=ip,
         ping_responses=responses,
         ping_attempts=ping_count,
         tcp_reachable=tcp_ok,
-        current_ssid=ssid,
-        detail=_format_detail(responses, ping_count, tcp_ok, ssid),
+        detail=_format_detail(responses, ping_count, tcp_ok),
     )
     _log.info("Wi-Fi check: %s", result)
     return result
@@ -97,31 +97,9 @@ def _tcp_connect(ip: str, *, port: int, timeout_s: float) -> bool:
         return False
 
 
-def _current_ssid() -> str | None:
-    """Best-effort lookup of the currently connected Wi-Fi SSID (Windows only)."""
-    if not sys.platform.startswith("win"):
-        return None
-    try:
-        proc = subprocess.run(
-            ["netsh", "wlan", "show", "interfaces"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except Exception:
-        return None
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if line.lower().startswith("ssid") and ":" in line and not line.lower().startswith("bssid"):
-            return line.split(":", 1)[1].strip() or None
-    return None
-
-
-def _format_detail(responses: int, attempts: int, tcp_ok: bool, ssid: str | None) -> str:
+def _format_detail(responses: int, attempts: int, tcp_ok: bool) -> str:
     parts = [f"ping {responses}/{attempts}"]
     parts.append("TCP OK" if tcp_ok else "TCP nedostupný")
-    if ssid:
-        parts.append(f"SSID='{ssid}'")
     return ", ".join(parts)
 
 

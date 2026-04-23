@@ -34,9 +34,11 @@ class SpotBundle:
         """Uklidí všechny manažery v opačném pořadí než při connect."""
         try:
             if self.move_dispatcher is not None:
-                self.move_dispatcher.stop()  # type: ignore[attr-defined]
+                # autonomy `MoveCommandDispatcher` používá `.shutdown()` pro zastavení
+                # background threadu (žádná .stop() metoda — .stop() znamená 'zastav robota').
+                self.move_dispatcher.shutdown()  # type: ignore[attr-defined]
         except Exception as exc:
-            _log.warning("move_dispatcher.stop failed: %s", exc)
+            _log.warning("move_dispatcher.shutdown failed: %s", exc)
         try:
             if self.lease is not None:
                 self.lease.release()  # type: ignore[attr-defined]
@@ -77,9 +79,34 @@ def connect(
     if with_estop:
         try:
             from app.robot.estop import EstopManager
+            from app.robot.power import PowerManager
+            from bosdyn.client.estop import MotorsOnError
 
-            estop = EstopManager(session)
-            estop.start()
+            try:
+                estop = EstopManager(session)
+                estop.start()
+            except MotorsOnError:
+                # Spot motory běží — typicky předchozí crash/instance
+                # je nevypnula, nebo jiný klient má Spot pod sebou. Bosdyn
+                # neumí měnit E-Stop config zatímco motor je ON. Auto-recovery:
+                # power_off + retry estop.start().
+                _log.warning(
+                    "E-Stop setup: Motors on — auto-recovering "
+                    "(power_off + retry). Spot si sedne."
+                )
+                try:
+                    PowerManager(session).power_off()
+                    _log.info("Motors powered off for E-Stop recovery")
+                except Exception as exc:
+                    _log.exception("Auto-recovery power_off failed: %s", exc)
+                    raise RuntimeError(
+                        "E-Stop setup selhal (motory on) a auto-recovery "
+                        "power_off taky selhal. Restartuj Spota fyzicky."
+                    ) from exc
+                # Retry — motor je nyní off.
+                estop = EstopManager(session)
+                estop.start()
+
             bundle.estop = estop
             _log.info("E-Stop endpoint registered")
         except Exception as exc:
@@ -107,11 +134,10 @@ def connect(
         from app.robot.commands import MoveCommandDispatcher, MoveCommandManager
 
         mgr = MoveCommandManager(session)
-        dispatcher = MoveCommandDispatcher(mgr)
-        dispatcher.start()
-        bundle.move_dispatcher = dispatcher
+        # `MoveCommandDispatcher.__init__` spouští thread sám — žádná .start() metoda.
+        bundle.move_dispatcher = MoveCommandDispatcher(mgr)
     except Exception as exc:
-        _log.exception("Failed to start move dispatcher: %s", exc)
+        _log.exception("Failed to create move dispatcher: %s", exc)
 
     return bundle
 

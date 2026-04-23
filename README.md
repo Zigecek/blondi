@@ -135,9 +135,9 @@ Klávesy jsou aktivní jen v kroku **teleop + focení** v nahrávacím wizardu:
 | `A` / `D` | strafe vlevo / vpravo |
 | `Q` / `E` | rotace vlevo / vpravo |
 | `Space` | soft stop (zastaví velocity command) |
-| `[` | foto z levé kamery |
-| `]` | foto z pravé kamery |
-| `P` | foto z obou kamer |
+| `V` | foto z levé kamery (preview → potvrdit / zrušit) |
+| `N` | foto z pravé kamery (preview → potvrdit / zrušit) |
+| `B` | foto z obou kamer (preview obou → potvrdit / zrušit) |
 | `C` | přidat waypoint (bez fotky) |
 | **F1** | **E-STOP — hardwarový nouzový stop** |
 
@@ -152,7 +152,7 @@ V playback wizardu je aktivní jen **F1** (E-STOP) — tam je autonomní režim.
 3. **Krok 2 — Přihlášení**: vyber profil nebo zadej údaje a klikni Připojit.
 4. **Krok 3 — Strana focení**: vyber Levá / Pravá / Obě strany.
 5. **Krok 4 — Fiducial**: postav Spota 1–2 m před fiducial u nabíječky, klikni Zkontrolovat.
-6. **Krok 5 — Teleop**: nahrávání se spustilo automaticky. Projeď Spotem parkoviště, u každého auta stiskni `[` / `]` / `P` pro fotku, případně `C` pro prostý waypoint. Vrať se k fiducialu.
+6. **Krok 5 — Teleop**: nahrávání se spustilo automaticky. Projeď Spotem parkoviště, u každého auta stiskni `V` / `N` / `B` pro fotku z levé / pravé / obou kamer. **Zobrazí se náhled** — zkontroluj, že SPZ je vidět, a potvrď "✓ Vyfotit a uložit" (nebo zruš a uprav pozici Spota). Klávesa `C` přidá waypoint bez fotky. Vrať se k fiducialu.
 7. **Krok 6 — Uložit**: znovu ověř fiducial, zadej jméno mapy (např. `parkoviste_sever_2026`), klikni Uložit mapu.
 
 Mapa se zabalí do ZIPu a uloží se **celá do PostgreSQL**. Můžeš ji pak spustit z libovolného PC proti stejné DB.

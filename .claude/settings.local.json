@@ -14,7 +14,12 @@
       "Bash(/c/Windows/System32/cmd.exe //c \".\\\\\\\\build_all.bat spot\")",
       "Bash(c:/Users/zige/spot/.venv/Scripts/python.exe --version)",
       "Bash(/c/Windows/System32/cmd.exe //c \"call .venv\\\\\\\\Scripts\\\\\\\\activate.bat && where pyinstaller && pyinstaller --version && python --version\")",
-      "Read(//c/Users/zige/AppData/Local/Programs/Python/Python312/Lib/site-packages/PyInstaller/bootloader/**)"
+      "Read(//c/Users/zige/AppData/Local/Programs/Python/Python312/Lib/site-packages/PyInstaller/bootloader/**)",
+      "PowerShell(Write-Host \"User-scoped VIRTUAL_ENV:\"; [Environment]::GetEnvironmentVariable\\(\"VIRTUAL_ENV\", \"User\"\\); Write-Host \"Machine-scoped VIRTUAL_ENV:\"; [Environment]::GetEnvironmentVariable\\(\"VIRTUAL_ENV\", \"Machine\"\\); Write-Host \"Process-scoped VIRTUAL_ENV:\"; $env:VIRTUAL_ENV)",
+      "Bash(iconv -f UTF-16LE -t UTF-8 c:/Users/zige/spot/build.log)",
+      "Read(//tmp/**)",
+      "Bash(\"c:/Users/zige/spot/.venv/Scripts/python.exe\" -m pytest \"c:/Users/zige/spot/tests/unit/\" \"c:/Users/zige/spot/tests/integration/test_autonomy_smoke.py\")",
+      "Bash(c:/Users/zige/spot/.venv/Scripts/python.exe -c ' *)"
     ],
     "additionalDirectories": [
       "C:\\Users\\zige\\.claude\\plans"

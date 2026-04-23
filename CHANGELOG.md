@@ -14,6 +14,181 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-04-23
+
+Nová UX feature: photo confirm overlay. Breaking change ve shortcutech
+(`[` `]` `P` → **V / B / N**). E-Stop recovery pro motors-on scénář.
+
+### Added
+
+- **`PhotoConfirmOverlay`** (`spot_operator/ui/common/photo_confirm_overlay.py`)
+  — non-modal widget zobrazený po kliknutí "Foto vlevo/vpravo/obě" v
+  TeleopRecordPage. Ukazuje **live video** z dotyčných kamer (1 nebo 2
+  pod sebou), operátor vizuálně ověří SPZ a potvrdí uložení tlačítkem
+  "✓ Vyfotit a uložit" (nebo zruší tlačítkem "✗ Zrušit"). WASD funguje
+  dál — overlay má `Qt.NoFocus` a klávesy propadnou do parent widgetu.
+- Capture se děje až **po potvrzení** (fresh gRPC volání) — overlay slouží
+  jen jako preview, ne buffer. Pokud operátor zruší, žádný waypoint ani
+  fotka se neuloží.
+- Tlačítka Foto vlevo/vpravo/obě jsou dočasně disabled během overlay
+  (prevence double-click, `_set_photo_buttons_enabled(False)`).
+
+### Changed
+
+- **Breaking — klávesové zkratky focení**: `[` / `]` / `P` →
+  **V / N / B** (Vlevo / pravá-N / oBě strany). Hranaté závorky na české
+  klávesnici vyžadují AltGr; V/B/N jsou přímo dostupné. Tlačítka v
+  TeleopRecordPage pojmenovaná s novými zkratkami v závorce.
+- Hint label v TeleopRecordPage má rozšířený druhý řádek s mapováním
+  V/N/B/C → foto vlevo/vpravo/obě/waypoint.
+- README sekce 9 (klávesy) a 10 (postup nahrávání mapy) aktualizováno.
+- Glosář `capture_sources` v instructions.md zmínit V/N/B a
+  PhotoConfirmOverlay.
+
+### Fixed
+
+- **E-Stop `MotorsOnError` auto-recovery** v `session_factory.connect`:
+  pokud při startu `estop.start()` → `force_simple_setup()` vyhodí bosdyn
+  `MotorsOnError` (motory Spota běží z předchozí instance / crashu /
+  jiného klienta), aplikace **automaticky** zavolá
+  `PowerManager.power_off()` a retry `estop.start()`. Dříve se aplikace
+  zasekla s warning v logu + `LeaseUseError` spam a operátor musel
+  restartovat celý spot_operator.
+- `TeleopRecordPage._teardown` nyní zavře overlay pokud existuje
+  (prevence thread leaku při zavření wizardu uprostřed preview).
+
+## [1.2.2] — 2026-04-22
+
+Drobný default fix. Live view používá `front_composite` (stitched přední
+obraz) místo single-camera `frontleft_fisheye_image`, jak je to v autonomy.
+
+### Changed
+
+- **FiducialPage / TeleopRecordPage / PlaybackRunPage** — po instanciaci
+  `ImagePipeline` voláme `set_source(CAMERA_FRONT_COMPOSITE)`. Operátor vidí
+  široký záběr přední části Spota (stitched frontleft + frontright kamery)
+  místo jen jedné kamery. Konzistentní s autonomy UI.
+- Pokud Spot pravou přední kameru nemá (firmware / konfigurace), autonomy
+  `ImagePoller.capture_front_composite()` fallne na samotnou levou — žádný
+  crash, žádné None frames (ověřeno v `autonomy/tests/test_image_poller.py`).
+
+### Fixed
+
+- V 1.2.0 byl `set_source(front_composite)` volaný, ale kvůli bugu
+  `ImagePipeline(session)` místo `ImagePipeline(poller)` celý live view
+  nefungoval (root cause 1.2.1 bug #3).
+- V 1.2.1 jsme `set_source` preventivně vypnuli jako safety — zbytečně,
+  protože jakmile pipeline dostal správný `ImagePoller`, poller má pro
+  `front_composite` special-case a funguje to out-of-the-box.
+
+### Trade-off
+
+- Stitched kompozit = 2× gRPC capture per frame → potenciálně polovička
+  FPS oproti single source. Při dobré Wi-Fi stále ~10 FPS, pro operátorský
+  teleop (~0.5 m/s) dostatečné.
+
+## [1.2.1] — 2026-04-22
+
+Bugfix-only release. 5 problémů z prvního reálného testu FiducialPage.
+
+### Fixed
+
+- **Live view se konečně zobrazuje.** `ImagePipeline` přijímá v konstruktoru
+  `ImagePoller` instanci, ne `SpotSession`. Všechny 3 pages (FiducialPage,
+  TeleopRecordPage, PlaybackRunPage) předávaly `session` místo poller →
+  `poller.capture(source)` tiše selhávalo s `AttributeError` a `frame_ready`
+  nikdy nepřišel. Nyní `_ensure_image_pipeline` / `_ensure_live_view` vytvoří
+  `ImagePoller(bundle.session)` a předá ji pipeline.
+- **WASD drží plynule.** Přidán QTimer 5 Hz (`_velocity_timer`) v FiducialPage
+  a TeleopRecordPage. Periodicky re-publishuje aktuální velocity pokud operátor
+  drží klávesy. Bez toho Spot zastavoval po ~10 cm — Spot SDK velocity má
+  default `end_time_secs ≈ 0.6 s` a autonomy `_CommandDispatcher` neopakuje
+  last command sám.
+- **E-Stop release funguje bez restartu aplikace.** `EstopFloating` teď
+  toggluje: klik v aktivním stavu → `on_trigger`, klik v triggered stavu →
+  `on_release`. F1 shortcut taky toggluje (`trigger_from_shortcut`).
+  FiducialPage/TeleopRecordPage/PlaybackRunPage registrují
+  `_handle_estop_release` jako `on_release` callback — volá
+  `EstopManager.release()` a resetuje stav stránky přes `_mark_spot_off`.
+- **Tlačítko "Zapnout a postavit Spota" je znovupoužitelné.** Bylo trvale
+  disabled po prvním úspěšném power_on → pokud Spot vypne (E-Stop release,
+  battery), operátor nemohl znovu zapnout. Nyní zůstává vždy enabled (krom
+  během worker threadu). Stav "Spot stojí / vypnutý" je v samostatném
+  `_power_state_label` vedle tlačítka. Idempotentní click — Spot SDK
+  `power_on` na running robot vrací rychle bez efektu.
+- **E-Stop widget už nepřekrývá tlačítka.** `EstopFloating._reposition` nyní
+  umisťuje widget do pravého **dolního** rohu parent widgetu (dříve horní →
+  překrývalo side panel s tlačítky "Zapnout Spota" / "Foto ..."). Widget
+  zvětšen na 220×70 px kvůli delšímu textu "⚠ AKTIVNÍ — klik uvolnit".
+
+### Changed
+
+- **FiducialPage nepoužívá `set_source(CAMERA_FRONT_COMPOSITE)`** — používá
+  default source z autonomy `ImagePipeline` (`frontleft_fisheye_image`).
+  Jednodušší cesta, 1 gRPC roundtrip místo 2, pro fiducial navigaci stačí.
+- **`SpotWizard.set_estop_callback(on_trigger, on_release=None)`** — nově
+  dva parametry. `trigger_estop` (F1 shortcut handler) nejprve zkouší
+  delegovat na `_estop_widget.trigger_from_shortcut` (který zná triggered
+  stav a toggluje), fallback na callbacky.
+- **`FiducialPage` má dva status labely** místo jednoho: `_power_state_label`
+  (trvalý stav Spot stojí/vypnutý, barevná tečka) a `_power_status` (průběžné
+  zprávy typu "Zapínám motory…", chybové hlášky).
+
+## [1.2.0] — 2026-04-22
+
+Opravy 4 problémů z prvního reálného testu na Windows stroji. **Breaking
+change ve wizardu** (recording 6 → 5 kroků; volba strany focení per-checkpoint).
+
+### Changed
+
+- **Recording wizard má nyní 5 kroků** (Wi-Fi, Login, Fiducial-s-teleopem,
+  Teleop-recording, Save) místo 6. `RecordingSidePage` smazán — volba strany
+  focení se dělá **per-checkpoint** v TeleopRecordPage přes tlačítka
+  "Foto vlevo" (`[`) / "Foto vpravo" (`]`) / "Foto z obou stran" (`P`).
+  Sémantika `maps.default_capture_sources` změněna: teď je to "obě strany, co
+  robot umí" (fallback); per-checkpoint přesné info je v
+  `checkpoints_json.checkpoints[*].capture_sources`.
+- **FiducialPage umožňuje dovézt Spota k fiducialu** — přidán live view
+  (`front_composite` source), WASD/QE teleop, floating E-Stop widget v pravém
+  horním rohu, explicitní tlačítko "Zapnout a postavit Spota" (volá
+  `bundle.power.power_on()` + `stand()` v FunctionWorker, ~20 s). WASD je
+  aktivní jen po úspěšném power-on. Operátor může na stránku vstoupit s
+  jakkoliv umístěným Spotem. Sdílená class pro recording i playback.
+- **Wi-Fi check přestal zobrazovat SSID** — `netsh wlan show interfaces`
+  vracelo SSID první Wi-Fi karty, což při multi-Wi-Fi setupu nebylo nutně ta,
+  na které běží Spot spojení. Ping + TCP test jsou dostatečný důkaz.
+  `_current_ssid()` smazán, `WifiCheckResult.current_ssid` odstraněn.
+- **Glosář `capture_sources`** v `instructions.md` upřesněn jako per-checkpoint
+  seznam (ne per-map).
+- **`instructions-reference.md`**: strom složek aktualizován (bez
+  `recording_side_page.py`), implementační pořadí bod 11 přeformulován.
+
+### Fixed
+
+- **`AttributeError: 'MoveCommandDispatcher' object has no attribute 'start'`**
+  při login — dispatcher si spouští thread sám v `__init__`, odstraněn chybný
+  `dispatcher.start()` volání v `session_factory.connect`.
+- **`SpotBundle.disconnect`** volal `move_dispatcher.stop()` → nyní `.shutdown()`
+  (autonomy: `.stop()` znamená "zastav robota", `.shutdown()` znamená "zastav
+  thread dispatcheru").
+- **`TeleopRecordPage._send_velocity`** volalo neexistující `dispatcher.send(vx, vy, vyaw)`
+  → nyní `.send_velocity(vx, vy, vyaw)` (správný API z autonomy).
+- **`TeleopRecordPage._teardown`** používal `dispatcher.send(0, 0, 0)` →
+  nyní `.stop()` (idiomatičtější).
+
+### Removed
+
+- **`spot_operator/ui/wizards/pages/recording_side_page.py`** — smazán, funkce
+  nahrazena per-checkpoint tlačítky v TeleopRecordPage.
+
+### Added
+
+- **`tests/integration/test_autonomy_smoke.py`** — rozšířeno o explicitní
+  asserty pro `MoveCommandDispatcher.send_velocity` / `.stop` / `.shutdown`,
+  a `assert not hasattr(MoveCommandDispatcher, "start")` aby se detekovalo,
+  kdyby autonomy v budoucnu zavedla `.start()` metodu (mělo by to vyvolat
+  review v spot_operatoru).
+
 ## [1.1.1] — 2026-04-22
 
 Konzistence fix — synchronizace verzí závislostí mezi deklarovaným a

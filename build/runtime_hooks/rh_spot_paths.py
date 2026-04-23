@@ -13,6 +13,13 @@ Strategie k .env:
 Strategie k OCR modelum:
   - Modely zustavaji v _MEIPASS/ocr/. Presmerujeme je via env promennou
     OCR_YOLO_MODEL (spot AppConfig ji cte).
+
+Strategie k runtime slozkam (logs, temp):
+  - Smerujeme do %LOCALAPPDATA%\\spot\\ (Windows konvence, per-user, writable).
+  - Lazy — slozky nevytvarime predem; spot_operator.config.ensure_runtime_dirs()
+    je vytvori az v okamziku prvniho pouziti.
+  - Na atexit zavreme file loggery a celou %LOCALAPPDATA%\\spot\\ smazeme.
+    Pri tvrdem padu (segfault, kill) atexit nebezi -> log zustane pro post-mortem.
 """
 
 from __future__ import annotations
@@ -73,8 +80,13 @@ def _apply() -> None:
         from spot_operator import constants as _const
     except Exception:
         return
-    _const.LOGS_DIR = exe_dir / "logs"
-    _const.TEMP_ROOT = exe_dir / "temp"
+
+    # Runtime slozka — %LOCALAPPDATA%\spot\ (fallback vedle .exe, kdyby LOCALAPPDATA
+    # nebyla nastavena, coz na Windows nema nastat).
+    appdata = os.environ.get("LOCALAPPDATA") or str(exe_dir)
+    runtime_dir = Path(appdata) / "spot"
+    _const.LOGS_DIR = runtime_dir / "logs"
+    _const.TEMP_ROOT = runtime_dir / "temp"
 
     # migrations.py ma ROOT importovany jako `from spot_operator.bootstrap import ROOT`
     # a pouziva ho pro alembic.ini + alembic/ — to jsou BUNDLED resources (lezi v
@@ -94,8 +106,25 @@ def _apply() -> None:
 
     _bs._verify_presence = _noop  # type: ignore[attr-defined]
 
-    for d in (_const.LOGS_DIR, _const.TEMP_ROOT):
-        d.mkdir(parents=True, exist_ok=True)
+    # atexit cleanup — zavre file loggery a smaze celou runtime slozku.
+    # Pri tvrdem padu (segfault, TerminateProcess) atexit nebezi -> log prezije.
+    import atexit
+    import logging
+    import shutil
+
+    def _cleanup_runtime() -> None:
+        root_logger = logging.getLogger()
+        for h in list(root_logger.handlers):
+            try:
+                h.close()
+            except Exception:
+                pass
+            root_logger.removeHandler(h)
+
+        if runtime_dir.exists():
+            shutil.rmtree(runtime_dir, ignore_errors=True)
+
+    atexit.register(_cleanup_runtime)
 
 
 _apply()

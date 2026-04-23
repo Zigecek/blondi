@@ -36,7 +36,8 @@ def pick_side_source(
 ) -> str | None:
     """Vrátí první kandidát z `candidates`, který je v `available`.
 
-    Používané v `RecordingSidePage` pro adaptaci na konkrétní Spot robot.
+    Používané v `TeleopRecordPage.initializePage` a `LoginPage._on_connect_ok`
+    pro adaptaci na konkrétní Spot robot.
     """
     for cand in candidates:
         if cand in available:

@@ -163,8 +163,8 @@ class LoginPage(QWizardPage):
 
         # Auto-detect dostupných image sources — některé Spoty advertise jen
         # `frontleft_fisheye_image` / `frontright_fisheye_image` místo
-        # `left_fisheye_image` / `right_fisheye_image`. RecordingSidePage si
-        # pak vybere podle dostupnosti.
+        # `left_fisheye_image` / `right_fisheye_image`. TeleopRecordPage si
+        # v initializePage podle toho nastaví `_camera_left` / `_camera_right`.
         try:
             from app.robot.images import ImagePoller
 
