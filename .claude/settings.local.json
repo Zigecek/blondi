@@ -25,7 +25,8 @@
       "Bash(.venv/Scripts/python.exe -c ' *)",
       "Bash(.venv/Scripts/python.exe -m pytest tests/unit/ -x -q)",
       "Bash(.venv/Scripts/python.exe -m py_compile spot_operator/ocr/reader.py spot_operator/services/playback_service.py spot_operator/logging_config.py tests/unit/test_ocr_normalize.py)",
-      "*"
+      "*",
+      "Bash(.venv/Scripts/python.exe -m py_compile spot_operator/constants.py spot_operator/services/playback_service.py spot_operator/ui/wizards/pages/playback_result_page.py tests/unit/test_robot_lost_error_detection.py)"
     ],
     "additionalDirectories": [
       "C:\\Users\\zige\\.claude\\plans"

@@ -24,6 +24,7 @@ from spot_operator.constants import (
     PLAYBACK_AVOIDANCE_STRENGTH,
     PLAYBACK_NAV_TIMEOUT_SEC,
     PLAYBACK_RETURN_HOME_TIMEOUT_SEC,
+    ROBOT_LOST_ERROR_MARKERS,
     TEMP_ROOT,
 )
 from spot_operator.db.engine import Session
@@ -70,6 +71,9 @@ class PlaybackService(QObject):
         self._run_id: Optional[int] = None
         self._abort_requested = False
         self._map_temp_dir: Optional[Path] = None
+        # `self._meta` persist pro přístup z `_navigate_with_retry` (strict
+        # re-localize recovery potřebuje fiducial_id + start_waypoint_id).
+        self._meta: Optional[MapMetadata] = None
 
     @property
     def navigator(self) -> Any:
@@ -204,6 +208,9 @@ class PlaybackService(QObject):
                 exc,
             )
 
+        # Persist meta pro přístup z retry smyčky (strict re-localize recovery).
+        self._meta = meta
+
         success = 0
         total = len(checkpoints)
         abort_reason: Optional[str] = None
@@ -221,25 +228,41 @@ class PlaybackService(QObject):
                     consecutive_nav_fails += 1
                     abort_reason = f"navigate failed at {cp.name}: {result.message}"
                     _log.warning(abort_reason)
-                    # Po 3 po sobě jdoucích selháních navigace ukonči run —
-                    # robot je pravděpodobně mis-localized nebo má fyzickou
-                    # překážku, další checkpointy budou taky fail.
+
+                    # TERMINÁLNÍ: RobotLostError = robot zcela ztratil
+                    # GraphNav lokalizaci. Retry ani další CP nemůže uspět
+                    # (bosdyn odmítá všechny navigate_to). Abort okamžitě.
+                    if self._is_robot_lost_error(result):
+                        _log.error(
+                            "Robot je ztracený (RobotLostError) — abort run. "
+                            "Fyzicky vrať Spota blíž k fiducialu a spusť "
+                            "playback znovu. Pokud se to opakuje, přidej víc "
+                            "fiducialů podél trasy."
+                        )
+                        self._emit_progress(
+                            "⚠ Robot ztratil GraphNav lokalizaci. Run abortován."
+                        )
+                        break
+
+                    # SAFETY NET: 3 po sobě jdoucí selhání = systémový problém
+                    # (mis-localizace, fyzická překážka), nemá smysl pokračovat.
                     if consecutive_nav_fails >= 3:
                         _log.error(
-                            "Aborting run — %d po sobě jdoucích selhání navigace. "
-                            "Robot je pravděpodobně mis-localized nebo má překážku.",
+                            "Aborting run — %d po sobě jdoucích selhání "
+                            "navigace. Robot je pravděpodobně mis-localized "
+                            "nebo má fyzickou překážku.",
                             consecutive_nav_fails,
                         )
                         break
-                    # Pokud byl retry vyčerpán i po re-localize (LOST/TIMEOUT),
-                    # nemá smysl pokračovat — robot je v nefunkčním stavu.
-                    if self._should_retry_outcome(result):
-                        _log.error(
-                            "Aborting run — re-localize nepomohl, robot nemůže "
-                            "pokračovat (%s).", result.outcome.value,
-                        )
-                        break
+
+                    # RECOVERABLE (TIMEOUT, STUCK, NO_ROUTE, LOST): zkus další
+                    # CP. GraphNav se občas probere i po neúspěšném retry —
+                    # log 2026-04-23 18:43 potvrzuje že TIMEOUT u WP_001 může
+                    # být jen chvilkový.
                     continue
+
+                # Po úspěšném navigate_to — kontrola drift před capture.
+                self._warn_if_drift(cp)
 
                 if cp.kind == "checkpoint" and cp.capture_sources:
                     self._capture_at_checkpoint(cp)
@@ -353,12 +376,57 @@ class PlaybackService(QObject):
                 f"{cp.name}: {result.outcome.value} — re-localize + retry "
                 f"{attempt}/{max_retries}"
             )
-            try:
-                if not self._navigator.relocalize_nearest_fiducial():
-                    _log.warning("Re-localize failed; retry will likely fail too.")
-            except Exception as exc:
-                _log.warning("Re-localize raised: %s", exc)
+            # Preferuj STRICT re-localize (hint na start_waypoint + FIDUCIAL_SPECIFIC).
+            # Pokud fiducial není vidět nebo strict selže, fallback na NEAREST.
+            strict_ok = False
+            if (
+                self._meta is not None
+                and self._meta.fiducial_id is not None
+                and self._meta.start_waypoint_id
+            ):
+                try:
+                    from spot_operator.robot.localize_strict import localize_at_start
+
+                    localize_at_start(
+                        self._bundle.session,
+                        fiducial_id=self._meta.fiducial_id,
+                        start_waypoint_id=self._meta.start_waypoint_id,
+                    )
+                    _log.info("Strict re-localize OK — retry navigate.")
+                    strict_ok = True
+                except Exception as exc:
+                    _log.debug(
+                        "Strict re-localize failed (%s); fallback to NEAREST.", exc
+                    )
+            if not strict_ok:
+                try:
+                    if not self._navigator.relocalize_nearest_fiducial():
+                        _log.warning("Re-localize failed; retry will likely fail too.")
+                except Exception as exc:
+                    _log.warning("Re-localize raised: %s", exc)
         return last_result
+
+    def _is_robot_lost_error(self, result) -> bool:  # noqa: ANN001 — NavigationResult
+        """Detekce RobotLostError přes substring match v message.
+
+        RobotLostError je TERMINÁLNÍ — bosdyn odmítá všechny navigate_to
+        dokud robota nerelokalizujeme. Liší se od TIMEOUT (recoverable).
+        """
+        msg = (getattr(result, "message", "") or "").lower()
+        return any(marker in msg for marker in ROBOT_LOST_ERROR_MARKERS)
+
+    def _warn_if_drift(self, cp: "CheckpointRef") -> None:
+        """Informativní warning pokud po úspěšném navigate_to skončil robot
+        na jiném waypointu než bylo cílem. Neabortuje — jen signalizuje
+        akumulující se odometry drift (prekurzor RobotLostError).
+        """
+        post_wp = self._current_localization_waypoint()
+        if post_wp and post_wp != cp.waypoint_id:
+            _log.warning(
+                "Localize drift at %s: bosdyn říká robot je na %s, cíl byl %s. "
+                "Drift pokračuje — riziko RobotLostError v dalších CP.",
+                cp.name, post_wp[:12], cp.waypoint_id[:12],
+            )
 
     def _current_localization_waypoint(self) -> str:
         """Vrátí aktuální waypoint_id robota, nebo prázdný string při chybě."""

@@ -77,6 +77,17 @@ PLAYBACK_NAV_TIMEOUT_SEC: float = 60.0
 PLAYBACK_RETURN_HOME_TIMEOUT_SEC: float = 180.0
 PLAYBACK_LOW_BATTERY_PERCENT: int = 15
 
+# Substring markery pro RobotLostError detekci v NavigationResult.message.
+# Bosdyn mění přesný formát exception message mezi verzemi — proto multi-substring
+# match. Case-insensitive (porovnáváme proti .lower()).
+# RobotLostError je TERMINÁLNÍ (bosdyn odmítá všechny navigate_to) na rozdíl od
+# TIMEOUT/STUCK/NO_ROUTE které jsou recoverable (GraphNav se občas probere).
+ROBOT_LOST_ERROR_MARKERS: tuple[str, ...] = (
+    "robotlosterror",
+    "already lost",
+    "robot is already lost",
+)
+
 # --- Obstacle avoidance strength (0–100, mapuje se na padding 0–0.35 m) ---
 # WASD manuální teleop: agresivnější (menší padding ~0.035 m).
 # Autonomní playback: konzervativnější (padding ~0.070 m).

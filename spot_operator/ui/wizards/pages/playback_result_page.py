@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QWizardPage,
 )
 
+from spot_operator.constants import ROBOT_LOST_ERROR_MARKERS
 from spot_operator.db.engine import Session
 from spot_operator.db.repositories import detections_repo, photos_repo, runs_repo
 from spot_operator.logging_config import get_logger
@@ -44,6 +45,18 @@ class PlaybackResultPage(QWizardPage):
         self._summary.setTextFormat(Qt.RichText)
         self._summary.setWordWrap(True)
         root.addWidget(self._summary)
+
+        # Actionable tip box — viditelný jen pokud run padl na RobotLostError
+        # nebo jiné terminální chybě. Skrytý pro úspěšné runy.
+        self._tip_box = QLabel("")
+        self._tip_box.setTextFormat(Qt.RichText)
+        self._tip_box.setWordWrap(True)
+        self._tip_box.setStyleSheet(
+            "QLabel { background:#fff3e0; border:2px solid #ef6c00; "
+            "border-radius:4px; padding:10px; color:#bf360c; }"
+        )
+        self._tip_box.setVisible(False)
+        root.addWidget(self._tip_box)
 
         self._table = QTableWidget(0, 5)
         self._table.setHorizontalHeaderLabels(
@@ -82,13 +95,44 @@ class PlaybackResultPage(QWizardPage):
                 )
                 return
             photos = photos_repo.list_for_run(s, self._run_id)
-            self._summary.setText(
-                f"<b>Run:</b> {run.run_code}<br>"
-                f"<b>Mapa:</b> {run.map_name_snapshot or '—'}<br>"
-                f"<b>Stav:</b> {run.status.value}<br>"
-                f"<b>Checkpointů:</b> {run.checkpoints_reached}/{run.checkpoints_total}<br>"
-                f"<b>Fotek:</b> {len(photos)}"
+            abort_reason = getattr(run, "abort_reason", None) or ""
+            summary_lines = [
+                f"<b>Run:</b> {run.run_code}",
+                f"<b>Mapa:</b> {run.map_name_snapshot or '—'}",
+                f"<b>Stav:</b> {run.status.value}",
+                f"<b>Checkpointů:</b> {run.checkpoints_reached}/{run.checkpoints_total}",
+                f"<b>Fotek:</b> {len(photos)}",
+            ]
+            if abort_reason:
+                summary_lines.append(
+                    f"<b>Důvod ukončení:</b> <span style='color:#c62828;'>"
+                    f"{abort_reason}</span>"
+                )
+            self._summary.setText("<br>".join(summary_lines))
+
+            # Pokud run selhal kvůli RobotLostError, ukaž actionable tip.
+            lost_reason = any(
+                marker in abort_reason.lower()
+                for marker in ROBOT_LOST_ERROR_MARKERS
             )
+            if lost_reason:
+                self._tip_box.setText(
+                    "⚠ <b>Robot ztratil GraphNav lokalizaci během jízdy.</b><br>"
+                    "<br>"
+                    "S jediným fiducialem u startu se Spot po ~15–20 m začíná "
+                    "ztrácet kvůli odometry driftu. Řešení:"
+                    "<ul>"
+                    "<li>Přidej <b>2–3 fiducialy podél trasy</b> (1 na začátek, "
+                    "1 v půlce, 1 na konci) — robot si průběžně opravuje polohu.</li>"
+                    "<li>Nebo nahraj <b>kratší trasu</b>, aby drift nestihl "
+                    "překročit mez.</li>"
+                    "<li>Spusť playback <b>znovu</b> z fiducialu — s trochou "
+                    "štěstí projde (drift je stochastický).</li>"
+                    "</ul>"
+                )
+                self._tip_box.setVisible(True)
+            else:
+                self._tip_box.setVisible(False)
 
             self._table.setRowCount(len(photos))
             for row, photo in enumerate(photos):
