@@ -136,13 +136,33 @@ def _unpack_result(result: Any) -> tuple[str, float | None]:
         conf_part = result.get("confidence")
         return _stringify(text_part), _floatify(conf_part)
 
-    # list of (text, confidence) for batch — vezmi první
+    # list of (text, confidence) / PlatePrediction for batch — vezmi první
     if isinstance(result, list) and result:
         return _unpack_result(result[0])
 
     # samotný string
     if isinstance(result, str):
         return result, None
+
+    # PlatePrediction (fast-plate-ocr >= ~0.3) — dataclass s .plate a .char_probs
+    plate_attr = getattr(result, "plate", None)
+    if plate_attr is not None:
+        text_part = _stringify(plate_attr)
+        conf_part: Any = getattr(result, "confidence", None)
+        if conf_part is None:
+            # char_probs = np.ndarray / list per-char, průměr přes znaky
+            char_probs = getattr(result, "char_probs", None)
+            if char_probs is not None:
+                try:
+                    conf_part = float(sum(char_probs) / len(char_probs))
+                except Exception:
+                    conf_part = None
+        return text_part, _floatify(conf_part)
+
+    # samotný .text atribut (jiné varianty API)
+    text_attr = getattr(result, "text", None)
+    if text_attr is not None:
+        return _stringify(text_attr), _floatify(getattr(result, "confidence", None))
 
     return "", None
 

@@ -32,15 +32,31 @@ class _WorkerBase(QThread):
     """Společná základna — životní cyklus signálů."""
 
     def stop_and_wait(self, timeout_ms: int = CRUD_WORKER_STOP_TIMEOUT_MS) -> None:
-        """Odpojí sloty a počká na ukončení threadu (nebo timeout)."""
-        for sig in self._lifecycle_signals():
+        """Odpojí sloty a počká na ukončení threadu (nebo timeout).
+
+        Je defenzivní vůči už smazanému C++ objektu (``worker.finished.connect(
+        worker.deleteLater)`` zruší C++ stranu dřív, než closeEvent iteruje
+        ``self._workers`` — v takovém případě jsou všechny operace no-op).
+        """
+        try:
+            signals = self._lifecycle_signals()
+        except RuntimeError:
+            return
+        for sig in signals:
             try:
                 sig.disconnect()
             except (TypeError, RuntimeError):
                 pass
-        if self.isRunning():
-            self.requestInterruption()
-            self.wait(timeout_ms)
+        try:
+            running = self.isRunning()
+        except RuntimeError:
+            return
+        if running:
+            try:
+                self.requestInterruption()
+                self.wait(timeout_ms)
+            except RuntimeError:
+                return
 
     def _lifecycle_signals(self) -> tuple[Signal, ...]:  # pragma: no cover - abstract
         return ()
