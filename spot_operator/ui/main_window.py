@@ -59,6 +59,10 @@ class MainWindow(QMainWindow):
         # Cleanup se musí zavolat jak při closeEvent, tak přes aboutToQuit
         # (kill signál / OS shutdown). Idempotentní flag zabrání double-run.
         self._cleanup_done: bool = False
+        # PR-11 FIND-161: dedup DB ping log (při DB down se jinak spamuje
+        # warning každých 5 s).
+        self._db_ping_last_state: bool | None = None
+        self._db_ping_fail_streak: int = 0
 
         self.setWindowTitle(f"{__app_name__} {__version__}")
         self.resize(960, 640)
@@ -373,16 +377,27 @@ class MainWindow(QMainWindow):
 
     def _update_db_status(self) -> None:
         ok = db_ping()
+        # PR-11 FIND-161: dedup log — první fail plný, pak každý 30. tick.
         if ok:
+            if self._db_ping_last_state is False:
+                _log.info("DB ping: recovered after %d failures", self._db_ping_fail_streak)
+            self._db_ping_fail_streak = 0
             self._db_status.setText("● DB OK")
             self._db_status.setStyleSheet(
                 "padding:4px 8px; font-weight:bold; color:#2e7d32;"
             )
         else:
+            self._db_ping_fail_streak += 1
+            if self._db_ping_last_state is not False or self._db_ping_fail_streak % 30 == 0:
+                _log.warning(
+                    "DB ping failed (streak=%d) — zkontroluj DATABASE_URL / síť",
+                    self._db_ping_fail_streak,
+                )
             self._db_status.setText("● DB DOWN")
             self._db_status.setStyleSheet(
                 "padding:4px 8px; font-weight:bold; color:#c62828;"
             )
+        self._db_ping_last_state = ok
 
     # ---- Close cleanup ----
 

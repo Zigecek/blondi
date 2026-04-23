@@ -33,12 +33,35 @@ def _prepend(path: str) -> None:
 
 
 def _verify_presence() -> None:
-    """Ověří, že autonomy a ocr složky existují. Bez toho nemá aplikace smysl běžet."""
+    """Ověří, že autonomy a ocr složky existují. Bez toho nemá aplikace smysl běžet.
+
+    PR-11 FIND-007: rozšířený check na kritické soubory (dřív se
+    kontroloval jen sdk_session.py + ocrtest.py — neúplná autonomy
+    pak crashla až v runtime).
+    """
+    required_autonomy: list[str] = [
+        "app/robot/sdk_session.py",
+        "app/robot/graphnav_navigation.py",
+        "app/robot/graphnav_recording.py",
+        "app/robot/images.py",
+        "app/robot/estop.py",
+        "app/robot/lease.py",
+        "app/robot/power.py",
+        "app/robot/commands.py",
+        "app/image_pipeline.py",
+        "app/models.py",
+    ]
+    required_ocr: list[str] = ["ocrtest.py"]
+
     missing: list[str] = []
-    if not (AUTONOMY_DIR / "app" / "robot" / "sdk_session.py").is_file():
-        missing.append(f"autonomy SDK session: {AUTONOMY_DIR / 'app/robot/sdk_session.py'}")
-    if not (OCR_DIR / "ocrtest.py").is_file():
-        missing.append(f"ocr skript: {OCR_DIR / 'ocrtest.py'}")
+    for rel in required_autonomy:
+        full = AUTONOMY_DIR / rel
+        if not full.is_file():
+            missing.append(f"autonomy: {full}")
+    for rel in required_ocr:
+        full = OCR_DIR / rel
+        if not full.is_file():
+            missing.append(f"ocr: {full}")
     if missing:
         raise RuntimeError(
             "Chybí povinné podprojekty (autonomy/ocr). Zkontroluj rozložení adresářů.\n"

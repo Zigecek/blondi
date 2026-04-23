@@ -19,6 +19,7 @@ VALID_CAPTURE_SOURCES: tuple[str, ...] = (
     CAMERA_RIGHT,
     CAMERA_FRONT_LEFT,
     CAMERA_FRONT_RIGHT,
+    CAMERA_FRONT_COMPOSITE,
     CAMERA_BACK,
 )
 
@@ -118,4 +119,7 @@ UI_PHOTO_OVERLAY_MIN_WIDTH: int = 600
 # --- CRUD tabulky (pagination) ---
 CRUD_PAGE_SIZE: int = 100
 CRUD_SEARCH_DEBOUNCE_MS: int = 200
-CRUD_WORKER_STOP_TIMEOUT_MS: int = 3000
+# PR-11 FIND-010: 3 s byl moc krátký pro DB dotazy nad 10k+ řádků.
+# Pokud worker neskončí včas, stop_and_wait vrátí False a Qt může crashnout
+# při pozdním signal delivery.
+CRUD_WORKER_STOP_TIMEOUT_MS: int = 10000

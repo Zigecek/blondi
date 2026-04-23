@@ -74,8 +74,18 @@ def setup(config: AppConfig) -> None:
     )
 
 
+_qt_handler_installed: bool = False
+
+
 def _install_qt_handler() -> None:
-    """Přesměruje Qt warnings/errors do Python loggingu."""
+    """Přesměruje Qt warnings/errors do Python loggingu.
+
+    PR-11 FIND-008: idempotent — opakované setup() volání nepřepisuje
+    existující handler (a neuniká paměť).
+    """
+    global _qt_handler_installed
+    if _qt_handler_installed:
+        return
     try:
         from PySide6.QtCore import QtMsgType, qInstallMessageHandler
     except Exception:  # pragma: no cover - Qt není v testech povinný
@@ -98,6 +108,8 @@ def _install_qt_handler() -> None:
             qt_logger.info(message)
 
     qInstallMessageHandler(handler)
+    global _qt_handler_installed
+    _qt_handler_installed = True
 
 
 def get_logger(name: str) -> logging.Logger:

@@ -34,15 +34,28 @@ def _single_instance_lock(config: AppConfig):
     Druhý Windows user na stejném stroji (nebo sdíleném profilu) má vlastní
     lock soubor a není blokovaný. Jméno souboru obsahuje `getpass.getuser()`
     pro izolaci.
+
+    PR-11 FIND-175: lock je v %LOCALAPPDATA%/spot_operator/ místo
+    temp_root, aby ho nevyčistil ``cleanup_temp_root`` nebo user mazáním
+    temp složky.
     """
     import getpass
+    import os
+    from pathlib import Path
 
     from PySide6.QtCore import QLockFile
 
     user = getpass.getuser() or "unknown"
     # Sanitizuj user jméno pro filesystem (žádné \\, /, :, ...).
     safe_user = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in user)
-    lock_path = config.temp_root / f"spot_operator_{safe_user}.lock"
+
+    lockdir = Path(os.getenv("LOCALAPPDATA") or config.temp_root) / "spot_operator"
+    try:
+        lockdir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        lockdir = config.temp_root
+        lockdir.mkdir(parents=True, exist_ok=True)
+    lock_path = lockdir / f"spot_operator_{safe_user}.lock"
 
     lock = QLockFile(str(lock_path))
     lock.setStaleLockTime(10_000)  # 10 s — předchozí crash
@@ -55,6 +68,15 @@ def _single_instance_lock(config: AppConfig):
 
 
 def main() -> int:
+    # PR-11 FIND-196: Python version guard.
+    if sys.version_info[:2] != (3, 10):
+        _fatal_dialog(
+            f"Spot Operator vyžaduje Python 3.10 (bosdyn SDK nepodporuje novější). "
+            f"Aktuální verze: {sys.version_info.major}.{sys.version_info.minor}. "
+            f"Reinstaluj .venv s Pythonem 3.10 (setup_venv.bat)."
+        )
+        return 3
+
     # CLI flag --diag: vypíše verze balíčků a skončí.
     diag = "--diag" in sys.argv
 
@@ -101,7 +123,9 @@ def main() -> int:
 
         cleanup_temp_root(config.temp_root)
     except Exception as exc:
-        log.warning("temp cleanup failed: %s", exc)
+        # PR-11 FIND-172: log.error místo warning — cleanup failure je
+        # neškodný pro bootstrap, ale user by měl vidět že disk se plní.
+        log.error("temp cleanup failed: %s — pokračuji bez úklidu", exc)
 
     from PySide6.QtWidgets import QApplication
 
@@ -133,7 +157,10 @@ def main() -> int:
     finally:
         if ocr_worker is not None:
             ocr_worker.request_stop()
-            ocr_worker.wait(5000)
+            # PR-11 FIND-171: 30 s timeout (YOLO warmup na slabším CPU
+            # může trvat 5-10 s, 5 s z originálu byl nedostatečný a
+            # zanechával zombie thread).
+            ocr_worker.wait(30000)
         shutdown_engine()
         lock.unlock()
         log.info("Spot Operator exited (code=%s)", exit_code)
@@ -142,16 +169,26 @@ def main() -> int:
 
 
 def _fatal_dialog(message: str) -> None:
-    """Zobrazí QMessageBox s fatální chybou (pokud už QApplication existuje)."""
+    """Zobrazí QMessageBox s fatální chybou (pokud už QApplication existuje).
+
+    PR-11 FIND-173: správný Qt lifecycle — pokud QApplication vytvoříme
+    ephemerně pro dialog, po exec musíme quit, aby nezanechávala
+    proces za sebou.
+    """
     try:
         from PySide6.QtWidgets import QApplication, QMessageBox
 
-        _ = QApplication(sys.argv) if QApplication.instance() is None else None
+        existing = QApplication.instance()
+        ephemeral: QApplication | None = None
+        if existing is None:
+            ephemeral = QApplication(sys.argv)
         box = QMessageBox()
         box.setIcon(QMessageBox.Critical)
         box.setWindowTitle("Spot Operator — fatální chyba")
         box.setText(message)
         box.exec()
+        if ephemeral is not None:
+            ephemeral.quit()
     except Exception:
         print("FATAL:", message, file=sys.stderr)
 
