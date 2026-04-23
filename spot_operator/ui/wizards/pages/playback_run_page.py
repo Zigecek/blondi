@@ -176,6 +176,14 @@ class PlaybackRunPage(QWizardPage):
         wizard = self.wizard()
         bundle = wizard.bundle()  # type: ignore[attr-defined]
         if bundle is None:
+            # PR-08 FIND-143: degradovaný stav bez early return, UI
+            # ukazuje jasné chybové hlášení místo "(live view)" placeholder.
+            self._status_label.setText(
+                "❌ Spot není připojen. Zavři wizard a připoj se znovu."
+            )
+            self._btn_start.setEnabled(False)
+            self._btn_stop_return.setVisible(False)
+            self._progress.setVisible(False)
             error_dialog(self, "Chyba", "Spot není připojen.")
             return
         state = wizard.playback_state()  # type: ignore[attr-defined]
@@ -245,7 +253,24 @@ class PlaybackRunPage(QWizardPage):
             except Exception:
                 pass
 
-        # 3) Odpoj OCR signály aby po zavření stránky neběžely queued call-y.
+        # 3) Odpoj PlaybackService signály (PR-08 FIND-141). Pokud
+        # run_thread ještě pokračuje v pozadí, signály by emit do
+        # zničené stránky. Disconnect bez slotu = disconnect všech.
+        if self._service is not None:
+            for sig_name in (
+                "progress", "run_started", "checkpoint_reached",
+                "photo_taken", "run_completed", "run_failed",
+                "drift_detected", "avoidance_failed",
+            ):
+                sig = getattr(self._service, sig_name, None)
+                if sig is None:
+                    continue
+                try:
+                    sig.disconnect()
+                except (TypeError, RuntimeError):
+                    pass
+
+        # 4) Odpoj OCR signály aby po zavření stránky neběžely queued call-y.
         if self._ocr_worker is not None and self._ocr_signals_connected:
             try:
                 self._ocr_worker.photo_processed.disconnect(self._on_ocr_done)
@@ -273,6 +298,14 @@ class PlaybackRunPage(QWizardPage):
             except Exception:
                 pass
             self._estop_widget = None
+        # PR-08 FIND-152: reset wizard-level E-Stop callback, aby F1 na
+        # další stránce nezavolal naše _handle_estop_release (zničená stránka).
+        try:
+            wiz = self.wizard()
+            if wiz is not None and hasattr(wiz, "set_estop_callback"):
+                wiz.set_estop_callback(None, None)
+        except Exception:
+            pass
 
         # 6) Smaž temp extrahovanou mapu.
         if self._service is not None:
@@ -368,7 +401,9 @@ class PlaybackRunPage(QWizardPage):
         state.lifecycle = WIZARD_LIFECYCLE_FAILED
         self._status_label.setText(f"⚠ Jízda skončila s chybou: {reason}")
         self._btn_stop_return.setVisible(False)
-        self._btn_next.setEnabled(self._run_id is not None)
+        # PR-08 FIND-142: Next button vždy enabled po dokončení; ResultPage
+        # si poradí i bez run_id (ukáže "Žádná jízda neproběhla").
+        self._btn_next.setEnabled(True)
         self._run_finished = True
         self.completeChanged.emit()
 
@@ -413,24 +448,38 @@ class PlaybackRunPage(QWizardPage):
 
         POZN: signál přichází z worker threadu, Qt ho doručí queued do UI threadu.
         Pokud stránka už není viditelná (wizard se zavřel), ignoruj.
+
+        PR-08 FIND-145: DB query pro detekce běží v BG worker, ne v UI thread —
+        při sérii rychle zpracovaných fotek se UI nesekne.
         """
         if not self.isVisible():
             return
         if count == 0:
             self._append_log(f"  (foto {photo_id}: SPZ nenalezena)")
             return
-        # Načti přečtené SPZ texty z DB.
-        try:
+        from spot_operator.ui.common.workers import FunctionWorker
+
+        def _load_plates(pid: int = photo_id) -> str:
             from spot_operator.db.engine import Session
             from spot_operator.db.repositories import detections_repo
 
             with Session() as s:
-                detections = detections_repo.list_for_photo(s, photo_id)
-            plates = ", ".join(d.plate_text or "?" for d in detections) or "?"
-            self._append_log(f"  🔤 SPZ: {plates}")
-        except Exception as exc:
-            _log.warning("Could not load detections for photo %s: %s", photo_id, exc)
-            self._append_log(f"  🔤 SPZ: {count} detekce (načtení selhalo)")
+                detections = detections_repo.list_for_photo(s, pid)
+            return ", ".join(d.plate_text or "?" for d in detections) or "?"
+
+        worker = FunctionWorker(_load_plates, parent=self)
+        worker.finished_ok.connect(
+            lambda plates, pid=photo_id: self._append_log(
+                f"  🔤 SPZ (foto {pid}): {plates}"
+            )
+        )
+        worker.failed.connect(
+            lambda err, pid=photo_id: self._append_log(
+                f"  🔤 SPZ (foto {pid}): načtení selhalo ({err})"
+            )
+        )
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
 
     def _on_ocr_failed(self, photo_id: int, reason: str) -> None:
         if not self.isVisible():
@@ -446,6 +495,11 @@ class PlaybackRunPage(QWizardPage):
             from app.ui.live_view_widget import LiveViewWidget
         except Exception as exc:
             _log.warning("ImagePipeline unavailable: %s", exc)
+            # PR-08 FIND-149: placeholder s jasnou zprávou, ne "(live view)".
+            self._live_placeholder.setText(
+                "⚠ Live view nedostupný\n"
+                "(ImagePipeline z autonomy se nepodařilo načíst)"
+            )
             return
         layout = self._live_container.layout()
         self._live_placeholder.setParent(None)

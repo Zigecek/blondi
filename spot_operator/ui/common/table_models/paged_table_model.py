@@ -118,6 +118,9 @@ class PagedTableModel(QAbstractTableModel):
         worker.ok.connect(lambda rows, rid=req_id, w=worker: self._on_page(rid, rows, w))
         worker.failed.connect(lambda err, rid=req_id, w=worker: self._on_fail(rid, err, w))
         worker.finished.connect(worker.deleteLater)
+        # PR-08 FIND-164: odstraň worker z listu po skončení — jinak
+        # Python reference drží zombie C++ objekty.
+        worker.finished.connect(lambda w=worker: self._remove_worker(w))
         self._workers.append(worker)
         worker.start()
 
@@ -147,6 +150,7 @@ class PagedTableModel(QAbstractTableModel):
         worker.ok.connect(lambda res, rid=req_id, w=worker: self._on_initial(rid, res, w))
         worker.failed.connect(lambda err, rid=req_id, w=worker: self._on_fail(rid, err, w))
         worker.finished.connect(worker.deleteLater)
+        worker.finished.connect(lambda w=worker: self._remove_worker(w))
         self._workers.append(worker)
         worker.start()
 
@@ -204,11 +208,22 @@ class PagedTableModel(QAbstractTableModel):
 
     # ---- Cleanup ----
 
+    def _remove_worker(self, worker: DbQueryWorker) -> None:
+        """Helper pro finished-slot — odstraní worker z listu."""
+        try:
+            self._workers.remove(worker)
+        except ValueError:
+            pass
+
     def stop_all_workers(self, timeout_ms: int = CRUD_WORKER_STOP_TIMEOUT_MS) -> None:
         """Volat z ``closeEvent`` parent widgetu. Odpojí + počká na workery."""
         self._request_id += 1  # invalidate all pending results
+        self._fetching = False
         for w in list(self._workers):
-            w.stop_and_wait(timeout_ms)
+            try:
+                w.stop_and_wait(timeout_ms)
+            except Exception as exc:
+                _log.debug("worker stop failed: %s", exc)
         self._workers.clear()
 
     # ---- Přístup k řádkům pro double-click handlery ----

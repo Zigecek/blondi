@@ -318,6 +318,17 @@ class TeleopRecordPage(QWizardPage):
             except Exception:
                 pass
             self._estop_widget = None
+        # PR-08 FIND-152: reset wizard-level E-Stop callback.
+        try:
+            wiz = self.wizard()
+            if wiz is not None and hasattr(wiz, "set_estop_callback"):
+                wiz.set_estop_callback(None, None)
+        except Exception:
+            pass
+
+        # 4b) Uvolni cached ImagePoller (PR-08 FIND-148).
+        if hasattr(self, "_poller"):
+            self._poller = None
 
         # 5) Pokud recording stále běží (např. nečekané zavření), abortuj bez uložení.
         if self._service is not None and self._service.is_recording:

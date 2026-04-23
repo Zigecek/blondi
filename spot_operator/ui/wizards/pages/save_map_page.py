@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from spot_operator.config import AppConfig
-from spot_operator.constants import MAP_NAME_REGEX
+from spot_operator.constants import CRUD_SEARCH_DEBOUNCE_MS, MAP_NAME_REGEX
 from spot_operator.logging_config import get_logger
 from spot_operator.services.map_storage import MapNameAlreadyExistsError
 from spot_operator.services.recording_service import RecordingService, RecordingSnapshot
@@ -44,6 +44,12 @@ class SaveMapPage(QWizardPage):
         # PR-04 FIND-140.
         self._snapshot: Optional[RecordingSnapshot] = None
         self._export_worker: Optional[FunctionWorker] = None
+        # PR-08 FIND-146: debounce timer pro _is_name_valid (DB query
+        # exists_by_name by jinak běžel na každý keystroke).
+        self._name_validate_timer = QTimer(self)
+        self._name_validate_timer.setSingleShot(True)
+        self._name_validate_timer.setInterval(CRUD_SEARCH_DEBOUNCE_MS)
+        self._name_validate_timer.timeout.connect(self._update_ok_state)
 
         self.setTitle("6. Uložit mapu")
         self.setSubTitle(
@@ -66,7 +72,10 @@ class SaveMapPage(QWizardPage):
         root.addWidget(QLabel("Jméno mapy (A-Z, 0-9, _, -, 3-40 znaků):"))
         self._name_edit = QLineEdit()
         self._name_edit.setPlaceholderText("např. parkoviste_sever_2026")
-        self._name_edit.textChanged.connect(lambda _: self._update_ok_state())
+        # Debounced update — restart timer při každém keystroku.
+        self._name_edit.textChanged.connect(
+            lambda _: self._name_validate_timer.start()
+        )
         root.addWidget(self._name_edit)
         self._name_hint = QLabel("")
         self._name_hint.setStyleSheet("color:#c62828;")

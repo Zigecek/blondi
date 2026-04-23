@@ -141,17 +141,23 @@ class DbQueryWorker(_WorkerBase):
 def cleanup_worker(
     worker: _WorkerBase | None, timeout_ms: int = CRUD_WORKER_STOP_TIMEOUT_MS
 ) -> None:
-    """Stops a worker thread and detaches late signals safely."""
+    """Stops a worker thread and detaches late signals safely.
+
+    PR-08 FIND-158: nejdřív connectnout finished→deleteLater, pak
+    stop_and_wait — aby Qt event loop doručil deleteLater až po
+    reálném skončení threadu, ne hned po ``wait()`` return.
+    """
     if worker is None:
         return
+    try:
+        # Schedule deleteLater po dokončení threadu (ne hned).
+        worker.finished.connect(worker.deleteLater)
+    except (TypeError, RuntimeError, AttributeError):
+        pass
     try:
         worker.stop_and_wait(timeout_ms=timeout_ms)
     except Exception as exc:  # pragma: no cover - defensive cleanup path
         _log.warning("Worker cleanup failed: %s", exc)
-    try:
-        worker.deleteLater()
-    except Exception:
-        pass
 
 
 __all__ = ["FunctionWorker", "DbQueryWorker", "cleanup_worker"]

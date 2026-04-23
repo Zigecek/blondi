@@ -87,8 +87,9 @@ class SpotWizard(QWizard):
     ) -> None:
         """Registruje callbacky pro F1 shortcut (alternativa k klikání widgetu).
 
-        `on_trigger` je povinný, `on_release` volitelný (pokud None, F1 v
-        triggered stavu nic neudělá — operátor musí kliknout widget).
+        Obě volby mohou být ``None`` — stránka při teardown volá
+        ``set_estop_callback(None, None)`` pro explicit reset, aby F1
+        na další stránce nezavolal zničené handlery.
         """
         self._estop_callback = on_trigger
         self._estop_release_callback = on_release
