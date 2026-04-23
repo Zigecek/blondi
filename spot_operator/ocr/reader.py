@@ -64,31 +64,60 @@ class FastPlateReader:
         """
         reader = self._ensure_loaded()
         if crop_bgr.size == 0:
+            _log.warning("FastPlate read: empty crop (size=0)")
             return "", None
 
         import cv2
 
+        h, w = crop_bgr.shape[:2]
+        _log.info("FastPlate read start: crop %dx%d", w, h)
+
         gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
 
+        result: Any = None
         try:
             try:
                 result = reader.run(gray, return_confidence=True)
-            except TypeError:
+            except TypeError as exc:
+                _log.warning(
+                    "FastPlate grayscale TypeError (retry bez return_confidence): %s",
+                    exc,
+                )
                 result = reader.run(gray)
         except Exception as exc:
             # Model nepřijal grayscale — zkus RGB variant modelů.
             _log.warning(
-                "fast_plate_ocr grayscale run failed (%s); trying RGB fallback.",
+                "FastPlate grayscale run failed (%s); trying RGB fallback.",
                 exc,
             )
             rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
             try:
-                result = reader.run(rgb, return_confidence=True)
-            except TypeError:
-                result = reader.run(rgb)
+                try:
+                    result = reader.run(rgb, return_confidence=True)
+                except TypeError as exc2:
+                    _log.warning(
+                        "FastPlate RGB TypeError (retry bez return_confidence): %s",
+                        exc2,
+                    )
+                    result = reader.run(rgb)
+            except Exception:
+                _log.exception("FastPlate RGB fallback also failed; returning empty")
+                return "", None
 
+        _log.debug("FastPlate raw result: %r", result)
         text, conf = _unpack_result(result)
-        return _normalize_plate(text), conf
+        normalized = _normalize_plate(text)
+        if normalized:
+            _log.info(
+                "FastPlate result: normalized='%s' conf=%s raw_text=%r",
+                normalized, conf, text,
+            )
+        else:
+            _log.warning(
+                "FastPlate returned empty text (raw_result=%r, raw_text=%r)",
+                result, text,
+            )
+        return normalized, conf
 
 
 def _unpack_result(result: Any) -> tuple[str, float | None]:

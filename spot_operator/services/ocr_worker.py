@@ -132,11 +132,14 @@ class OcrWorker(QThread):
             s.commit()
 
         assert photo_id is not None
+        _log.info(
+            "OCR worker claimed photo=%s (%d bytes)", photo_id, len(image_bytes)
+        )
         try:
             detections = self._pipeline.process(image_bytes)
             self._store_results(photo_id, detections)
             self.photo_processed.emit(photo_id, len(detections))
-            _log.debug("OCR done photo=%s detections=%d", photo_id, len(detections))
+            _log.info("OCR worker done photo=%s detections=%d", photo_id, len(detections))
             return True
         except Exception as exc:
             _log.exception("OCR failed on photo %s: %s", photo_id, exc)

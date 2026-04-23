@@ -320,6 +320,33 @@ def reset_to_pending(session: Session, photo_id: int) -> None:
     )
 
 
+def reset_all_to_pending(
+    session: Session, *, run_id: int | None = None
+) -> int:
+    """Hromadný reset všech fotek ve stavu done/failed zpět na pending.
+
+    Použití: CRUD tlačítko "Reset všech na pending" v záložce Fotky, aby OCR
+    worker znovu projel celou frontu. Neresetuje fotky ve stavu `processing`
+    (ty vyřeší `sweep_zombies`).
+
+    Vrací počet resetovaných řádků.
+    """
+    stmt = (
+        update(Photo)
+        .where(Photo.ocr_status.in_((OcrStatus.done, OcrStatus.failed)))
+        .values(
+            ocr_status=OcrStatus.pending,
+            ocr_processed_at=None,
+            ocr_locked_by=None,
+            ocr_locked_at=None,
+        )
+    )
+    if run_id is not None:
+        stmt = stmt.where(Photo.run_id == run_id)
+    result = session.execute(stmt)
+    return result.rowcount or 0
+
+
 def sweep_zombies(session: Session, timeout_minutes: int = 5) -> int:
     """Resetuje photos co se zasekly v 'processing' déle než timeout_minutes.
 
@@ -360,5 +387,6 @@ __all__ = [
     "mark_done",
     "mark_failed",
     "reset_to_pending",
+    "reset_all_to_pending",
     "sweep_zombies",
 ]

@@ -87,14 +87,35 @@ def reprocess_bytes(
             cwd=str(ROOT),
         )
         stdout = proc.stdout.strip().splitlines()
+        stderr_text = proc.stderr or ""
+        _log.info(
+            "Nomeroff subprocess exit=%d stdout_lines=%d stderr_len=%d",
+            proc.returncode, len(stdout), len(stderr_text),
+        )
         if not stdout:
-            _log.warning("Nomeroff subprocess returned no output. stderr=%s", proc.stderr)
+            _log.warning(
+                "Nomeroff subprocess EMPTY stdout (exit=%d). stderr:\n%s",
+                proc.returncode, stderr_text,
+            )
             return []
         payload = _find_json_line(stdout)
         if payload is None or "error" in payload:
-            _log.warning("Nomeroff subprocess error: %s", payload)
+            _log.warning(
+                "Nomeroff subprocess payload error: %s; stderr:\n%s",
+                payload, stderr_text,
+            )
             return []
         detections = _parse_nomeroff_output(payload.get("detections", []))
+        for d in detections:
+            _log.info(
+                "Nomeroff parsed detection: plate=%s bbox=(%d,%d,%d,%d)",
+                d.plate, d.bbox.x1, d.bbox.y1, d.bbox.x2, d.bbox.y2,
+            )
+        if not detections:
+            _log.warning(
+                "Nomeroff subprocess returned 0 detections (raw payload=%s)",
+                payload,
+            )
         return detections
     except subprocess.TimeoutExpired:
         _log.warning("Nomeroff subprocess timed out after %ds", _SUBPROCESS_TIMEOUT_SEC)

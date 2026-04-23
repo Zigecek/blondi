@@ -50,23 +50,48 @@ class OcrPipeline:
     def process(self, image_bytes: bytes) -> list[Detection]:
         """Zpracuje jednu fotku → list detekcí SPZ."""
         if not image_bytes:
+            _log.warning("OCR pipeline: called with empty image_bytes")
             return []
 
+        _log.info("OCR pipeline start: %d bytes", len(image_bytes))
         arr = np.frombuffer(image_bytes, np.uint8)
         image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if image is None:
             _log.warning("OCR pipeline: failed to decode image (%d bytes)", len(image_bytes))
             return []
 
+        h, w = image.shape[:2]
+        channels = image.shape[2] if image.ndim == 3 else 1
+        _log.info(
+            "OCR pipeline: image decoded %dx%d, %d channels", w, h, channels
+        )
+
         with self._lock:
             boxes = self._detector.detect(image)
+            if boxes:
+                _log.info("OCR pipeline: %d candidate box(es) from YOLO", len(boxes))
+            else:
+                _log.warning("OCR pipeline: YOLO returned NO candidates")
+
             detections: list[Detection] = []
-            for bbox, det_conf in boxes:
+            total = len(boxes)
+            for idx, (bbox, det_conf) in enumerate(boxes, start=1):
+                _log.info(
+                    "OCR pipeline: box %d/%d bbox=(%d,%d,%d,%d) det_conf=%.2f",
+                    idx, total, bbox.x1, bbox.y1, bbox.x2, bbox.y2, det_conf,
+                )
                 crop = image[bbox.y1 : bbox.y2, bbox.x1 : bbox.x2]
                 if crop.size == 0:
+                    _log.warning(
+                        "OCR pipeline: box %d/%d has empty crop, skipping", idx, total
+                    )
                     continue
                 text, text_conf = self._reader.read(crop)
                 if not text:
+                    _log.warning(
+                        "OCR pipeline: box %d/%d reader returned empty text, skipping",
+                        idx, total,
+                    )
                     continue
                 detections.append(
                     Detection(
@@ -77,6 +102,17 @@ class OcrPipeline:
                         engine_name=OCR_ENGINE_FAST_PLATE,
                         engine_version=self._reader.engine_version,
                     )
+                )
+
+            if detections:
+                _log.info(
+                    "OCR pipeline done: %d valid detection(s) [%s]",
+                    len(detections),
+                    ", ".join(d.plate for d in detections),
+                )
+            else:
+                _log.warning(
+                    "OCR pipeline done: 0 detections (boxes=%d)", total
                 )
             return detections
 

@@ -42,22 +42,45 @@ class YoloDetector:
     def detect(self, image_bgr: np.ndarray) -> list[tuple[BoundingBox, float]]:
         """Detekuje SPZ. Vrátí list (bbox, detection_confidence)."""
         model = self._ensure_loaded()
+        h, w = image_bgr.shape[:2]
+        _log.info(
+            "YOLO detect start: image %dx%d, conf_threshold=%.2f",
+            w, h, self._min_confidence,
+        )
         results = model(image_bgr, conf=self._min_confidence, verbose=False)
         if not results:
+            _log.warning("YOLO detect: model returned empty results object")
             return []
 
-        out: list[tuple[BoundingBox, float]] = []
         first = results[0]
         boxes = getattr(first, "boxes", None)
         if boxes is None:
+            _log.warning("YOLO detect: results[0].boxes is None")
             return []
+
+        raw_confs: list[float] = []
+        out: list[tuple[BoundingBox, float]] = []
         for box in boxes:
             conf = float(box.conf[0])
+            raw_confs.append(conf)
             if conf < self._min_confidence:
                 continue
             xyxy = box.xyxy[0].tolist()
             x1, y1, x2, y2 = (int(v) for v in xyxy)
             out.append((BoundingBox(x1, y1, x2, y2), conf))
+
+        _log.info(
+            "YOLO raw: %d box(es), confidences=%s",
+            len(raw_confs),
+            ["%.2f" % c for c in raw_confs],
+        )
+        if out:
+            _log.info("YOLO kept %d box(es) above threshold", len(out))
+        else:
+            _log.warning(
+                "YOLO kept 0 box(es) (raw=%d, threshold=%.2f)",
+                len(raw_confs), self._min_confidence,
+            )
         return out
 
 

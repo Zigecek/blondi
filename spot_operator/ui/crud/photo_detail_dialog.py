@@ -31,12 +31,14 @@ from PySide6.QtWidgets import (
 )
 
 from spot_operator.config import AppConfig
+from spot_operator.constants import OCR_ENGINE_FAST_PLATE, OCR_ENGINE_NOMEROFF
 from spot_operator.db.engine import Session
 from spot_operator.db.enums import PlateStatus
 from spot_operator.db.repositories import detections_repo, photos_repo, plates_repo
 from spot_operator.db.repositories.photos_repo import PhotoMetadata
 from spot_operator.logging_config import get_logger
 from spot_operator.ocr.fallback import reprocess_bytes
+from spot_operator.ocr.pipeline import create_default_pipeline
 from spot_operator.ui.common.dialogs import confirm_dialog, error_dialog, info_dialog
 from spot_operator.ui.common.workers import DbQueryWorker, FunctionWorker
 
@@ -78,9 +80,20 @@ class PhotoDetailDialog(QDialog):
         root.addWidget(self._detail_text)
 
         action_row = QHBoxLayout()
-        self._btn_reocr = QPushButton("Spustit OCR znovu (Nomeroff fallback)")
-        self._btn_reocr.clicked.connect(self._run_reocr)
-        action_row.addWidget(self._btn_reocr)
+        self._btn_reocr_fast_plate = QPushButton("Re-OCR: fast-plate (hlavní)")
+        self._btn_reocr_fast_plate.setToolTip(
+            "Spustí hlavní OCR pipeline (YOLO + fast-plate-ocr) nad touto fotkou."
+        )
+        self._btn_reocr_fast_plate.clicked.connect(self._run_reocr_fast_plate)
+        action_row.addWidget(self._btn_reocr_fast_plate)
+
+        self._btn_reocr_nomeroff = QPushButton("Re-OCR: Nomeroff")
+        self._btn_reocr_nomeroff.setToolTip(
+            "Spustí Nomeroff fallback (subprocess s torch/nomeroff_net) nad touto fotkou."
+        )
+        self._btn_reocr_nomeroff.clicked.connect(self._run_reocr_nomeroff)
+        action_row.addWidget(self._btn_reocr_nomeroff)
+
         action_row.addStretch(1)
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.reject)
@@ -224,40 +237,65 @@ class PhotoDetailDialog(QDialog):
 
     # ---- Re-OCR ----
 
-    def _run_reocr(self) -> None:
+    def _run_reocr_nomeroff(self) -> None:
         if self._reocr_worker is not None and self._reocr_worker.isRunning():
             return
-        self._btn_reocr.setEnabled(False)
+        self._set_reocr_buttons_enabled(False)
         photo_id = self._photo_id
         yolo_path = self._config.ocr_yolo_model_path
 
         worker = FunctionWorker(
-            _reocr_task, photo_id, yolo_path, parent=self,
+            _reocr_nomeroff_task, photo_id, yolo_path, parent=self,
         )
-        worker.finished_ok.connect(self._on_reocr_done)
+        worker.finished_ok.connect(
+            lambda detections: self._on_reocr_done(detections, OCR_ENGINE_NOMEROFF)
+        )
         worker.failed.connect(self._on_reocr_failed)
         worker.finished.connect(worker.deleteLater)
         self._reocr_worker = worker
         worker.start()
 
-    def _on_reocr_done(self, detections) -> None:  # noqa: ANN001
+    def _run_reocr_fast_plate(self) -> None:
+        if self._reocr_worker is not None and self._reocr_worker.isRunning():
+            return
+        self._set_reocr_buttons_enabled(False)
+        photo_id = self._photo_id
+        config = self._config
+
+        worker = FunctionWorker(
+            _reocr_fast_plate_task, photo_id, config, parent=self,
+        )
+        worker.finished_ok.connect(
+            lambda detections: self._on_reocr_done(detections, OCR_ENGINE_FAST_PLATE)
+        )
+        worker.failed.connect(self._on_reocr_failed)
+        worker.finished.connect(worker.deleteLater)
+        self._reocr_worker = worker
+        worker.start()
+
+    def _set_reocr_buttons_enabled(self, enabled: bool) -> None:
+        self._btn_reocr_fast_plate.setEnabled(enabled)
+        self._btn_reocr_nomeroff.setEnabled(enabled)
+
+    def _on_reocr_done(self, detections, engine_name: str) -> None:  # noqa: ANN001
         self._reocr_worker = None
         if not self.isVisible():
             return
         try:
             with Session() as s:
-                engine_name = (
-                    detections[0].engine_name if detections else "yolo_v1m+nomeroff"
-                )
                 detections_repo.delete_for_photo_engine(s, self._photo_id, engine_name)
                 if detections:
                     rows = [d.to_db_row(self._photo_id) for d in detections]
                     detections_repo.insert_many(s, rows)
                 s.commit()
-            info_dialog(self, "Re-OCR hotové", f"Detekcí: {len(detections)}")
+            info_dialog(
+                self,
+                "Re-OCR hotové",
+                f"Engine: {engine_name}\nDetekcí: {len(detections)}",
+            )
         except Exception as exc:
             error_dialog(self, "Chyba", str(exc))
-        self._btn_reocr.setEnabled(True)
+        self._set_reocr_buttons_enabled(True)
         # Přenačti metadata (detekce se změnily) — nikoli obrázek.
         self._load_metadata()
 
@@ -265,19 +303,34 @@ class PhotoDetailDialog(QDialog):
         self._reocr_worker = None
         if not self.isVisible():
             return
-        self._btn_reocr.setEnabled(True)
+        self._set_reocr_buttons_enabled(True)
         error_dialog(self, "Re-OCR selhalo", reason)
 
 
 # ---- Helpery ----
 
-def _reocr_task(photo_id: int, yolo_model_path):  # noqa: ANN001 — běží v BG threadu
-    """Re-OCR work: stáhne bytes a projede Nomeroff fallback. BG thread."""
+def _reocr_nomeroff_task(photo_id: int, yolo_model_path):  # noqa: ANN001 — běží v BG threadu
+    """Re-OCR work: stáhne bytes a projede Nomeroff subprocess. BG thread."""
     with Session() as s:
         image_bytes = photos_repo.fetch_image_bytes(s, photo_id)
     if not image_bytes:
         raise RuntimeError("Foto nenalezeno nebo prázdné.")
     return reprocess_bytes(image_bytes, yolo_model_path=yolo_model_path)
+
+
+def _reocr_fast_plate_task(photo_id: int, config: AppConfig):
+    """Re-OCR work: stáhne bytes a projede hlavní pipeline (YOLO + fast-plate-ocr).
+
+    Pipeline se vytváří per-call (ne sdílená s automatickým workerem) — lazy load
+    YOLO+ONNX trvá pár sekund na první spuštění, ale běží v BG threadu a pro
+    manuální test to je přijatelné.
+    """
+    with Session() as s:
+        image_bytes = photos_repo.fetch_image_bytes(s, photo_id)
+    if not image_bytes:
+        raise RuntimeError("Foto nenalezeno nebo prázdné.")
+    pipeline = create_default_pipeline(config)
+    return pipeline.process(image_bytes)
 
 
 def _format_detail(meta: PhotoMetadata) -> str:
