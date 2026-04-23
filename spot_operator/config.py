@@ -1,4 +1,10 @@
-"""Aplikační konfigurace z .env + environment proměnných."""
+"""Aplikační konfigurace z .env + environment proměnných.
+
+Poznámka k ``load_dotenv`` prioritě: ``override=False`` (default) znamená,
+že env var v shellu má přednost před hodnotou v ``.env``. Při debugování
+"proč se mi .env nenačte" ověř: ``echo $FOO`` — pokud vrací něco,
+.env je ignorován pro tuto proměnnou.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +16,10 @@ from dotenv import load_dotenv
 
 from spot_operator.bootstrap import ROOT
 from spot_operator.constants import LOGS_DIR, TEMP_ROOT
+
+_VALID_LOG_LEVELS: frozenset[str] = frozenset(
+    {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,25 +54,34 @@ class AppConfig:
         if env_file.is_file():
             load_dotenv(env_file, override=False)
 
-        database_url = _require("DATABASE_URL")
+        database_url = _resolve_database_url()
         spot_default_ip = os.environ.get("SPOT_DEFAULT_IP", "192.168.80.3")
-        spot_timeout_seconds = float(os.environ.get("SPOT_TIMEOUT_SECONDS", "15"))
-        fiducial_distance_threshold_m = float(
-            os.environ.get("FIDUCIAL_DISTANCE_THRESHOLD_M", "2.0")
+        spot_timeout_seconds = _require_float(
+            "SPOT_TIMEOUT_SECONDS", "15", min_val=1.0, max_val=300.0
+        )
+        fiducial_distance_threshold_m = _require_float(
+            "FIDUCIAL_DISTANCE_THRESHOLD_M", "2.0", min_val=0.1, max_val=20.0
         )
         ocr_yolo_model_rel = os.environ.get(
             "OCR_YOLO_MODEL", "ocr/license-plate-finetune-v1m.pt"
         )
-        ocr_yolo_model_path = ROOT / ocr_yolo_model_rel
+        # PR-10 FIND-193: absolutní cesta se nechá as-is, relativní vs ROOT.
+        p = Path(ocr_yolo_model_rel)
+        ocr_yolo_model_path = p if p.is_absolute() else ROOT / p
         ocr_text_engine = os.environ.get(
             "OCR_TEXT_ENGINE", "european-plates-mobile-vit-v2-model"
         )
-        ocr_detection_min_confidence = float(
-            os.environ.get("OCR_DETECTION_MIN_CONFIDENCE", "0.5")
+        ocr_detection_min_confidence = _require_float(
+            "OCR_DETECTION_MIN_CONFIDENCE", "0.5", min_val=0.0, max_val=1.0
         )
         keyring_service = os.environ.get("KEYRING_SERVICE", "spot_operator.spot")
         operator_label = os.environ.get("OPERATOR_LABEL", "")
         log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+        if log_level not in _VALID_LOG_LEVELS:
+            raise RuntimeError(
+                f"LOG_LEVEL={log_level!r} není platná úroveň. "
+                f"Povolené hodnoty: {', '.join(sorted(_VALID_LOG_LEVELS))}."
+            )
 
         return cls(
             database_url=database_url,
@@ -89,8 +108,64 @@ class AppConfig:
 def _require(key: str) -> str:
     value = os.environ.get(key)
     if not value:
+        example_path = ROOT / ".env.example"
+        if example_path.is_file():
+            hint = "Zkopíruj .env.example na .env a doplň ji."
+        else:
+            hint = f"Nastav env proměnnou {key!r} nebo vytvoř soubor .env."
         raise RuntimeError(
-            f"Chybí povinná proměnná prostředí '{key}'. "
-            f"Zkopíruj .env.example na .env a doplň ji."
+            f"Chybí povinná proměnná prostředí {key!r}. {hint}"
         )
     return value
+
+
+def _require_float(
+    key: str,
+    default: str,
+    *,
+    min_val: float | None = None,
+    max_val: float | None = None,
+) -> float:
+    """Načte env var jako float s range kontrolou a CZ chybami (PR-10 FIND-003)."""
+    raw = os.environ.get(key, default)
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Proměnná prostředí {key}={raw!r} není platné číslo: {exc}"
+        ) from exc
+    if min_val is not None and value < min_val:
+        raise RuntimeError(
+            f"Proměnná prostředí {key}={value} je menší než povolené minimum {min_val}."
+        )
+    if max_val is not None and value > max_val:
+        raise RuntimeError(
+            f"Proměnná prostředí {key}={value} je větší než povolené maximum {max_val}."
+        )
+    return value
+
+
+def _resolve_database_url() -> str:
+    """Vyřeší DATABASE_URL. PR-10 FIND-001: podpora opt-in keyring pro heslo
+    (DATABASE_URL_TEMPLATE s ``{password}`` placeholder + keyring key).
+
+    Kompatibilita: ``DATABASE_URL`` stále funguje jako primární cesta
+    (plaintext password). Migrace: ``.env`` s template → heslo v keyringu.
+    """
+    template = os.environ.get("DATABASE_URL_TEMPLATE")
+    keyring_key = os.environ.get("DATABASE_PASSWORD_KEYRING_KEY")
+    if template and keyring_key:
+        try:
+            import keyring  # type: ignore[import-not-found]
+        except ImportError as exc:
+            raise RuntimeError(
+                "DATABASE_URL_TEMPLATE set, ale keyring package není nainstalován."
+            ) from exc
+        password = keyring.get_password("spot_operator.db", keyring_key)
+        if not password:
+            raise RuntimeError(
+                f"Heslo k DB pod klíčem {keyring_key!r} není ve Windows Credential "
+                "Locker. Nastav ho přes keyring CLI nebo credentials utility."
+            )
+        return template.format(password=password)
+    return _require("DATABASE_URL")
