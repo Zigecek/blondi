@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from spot_operator.config import AppConfig
-from spot_operator.constants import CAMERA_FRONT_COMPOSITE
+from spot_operator.constants import CAMERA_FRONT_COMPOSITE, UI_SIDE_PANEL_WIDTH
 from spot_operator.logging_config import get_logger
 from spot_operator.services.map_storage import MapMetadata
 from spot_operator.services.playback_service import PlaybackService
@@ -110,7 +110,7 @@ class PlaybackRunPage(QWizardPage):
 
         # Pravý panel
         side = QFrame()
-        side.setFixedWidth(320)
+        side.setFixedWidth(UI_SIDE_PANEL_WIDTH)
         side_layout = QVBoxLayout(side)
 
         self._btn_start = QPushButton("▶ START")
@@ -133,7 +133,8 @@ class PlaybackRunPage(QWizardPage):
         side_layout.addSpacing(8)
 
         self._log_list = QListWidget()
-        self._log_list.setMaximumHeight(240)
+        self._log_list.setMinimumHeight(120)
+        self._log_list.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         side_layout.addWidget(self._log_list, stretch=1)
 
         self._btn_stop_return = QPushButton("■ STOP s návratem domů")
@@ -149,6 +150,11 @@ class PlaybackRunPage(QWizardPage):
         self._btn_next.clicked.connect(self._go_next)
         side_layout.addWidget(self._btn_next)
 
+        # Prázdný prostor dole → E-STOP floating widget (pravý dolní roh)
+        # se nepřekrývá s "Pokračovat k výsledku". Stejný pattern jako ostatní
+        # stránky s side panelem (teleop_record_page, fiducial_page).
+        side_layout.addStretch(1)
+
         root.addWidget(side)
 
     def initializePage(self) -> None:
@@ -161,7 +167,6 @@ class PlaybackRunPage(QWizardPage):
         self._service = PlaybackService(bundle)
         self._wire_service_signals()
 
-        # Uplay mapu + lokalizace v pozadí
         from spot_operator.ui.common.workers import FunctionWorker
 
         map_id = wizard.property("selected_map_id")
@@ -169,10 +174,12 @@ class PlaybackRunPage(QWizardPage):
             error_dialog(self, "Chyba", "Není vybraná mapa.")
             return
 
+        # Sériově: extract z DB + upload do Spota + localize u fiducialu.
+        # Robot v této fázi stojí — žádný souběh s velocity commandy.
         self._progress.setVisible(True)
         self._progress.setRange(0, 0)
         self._btn_start.setEnabled(False)
-
+        self._status_label.setText("Nahrávám mapu do Spota...")
         worker = FunctionWorker(self._service.prepare_map, int(map_id))
         worker.finished_ok.connect(self._on_prepare_ok)
         worker.failed.connect(self._on_prepare_failed)

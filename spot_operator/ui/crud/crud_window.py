@@ -22,8 +22,8 @@ class CrudWindow(QMainWindow):
         self.resize(1100, 720)
 
         tabs = QTabWidget(self)
-        tabs.addTab(SpzTab(self), "SPZ registr")
-        tabs.addTab(RunsTab(self), "Běhy")
+        tabs.addTab(SpzTab(self._config, parent=self), "SPZ registr")
+        tabs.addTab(RunsTab(self._config, parent=self), "Běhy")
         tabs.addTab(PhotosTab(self._config, self), "Fotky")
         self.setCentralWidget(tabs)
 

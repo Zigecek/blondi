@@ -148,8 +148,24 @@ def read_map_metadata(map_id: int) -> MapMetadata | None:
 
 
 def list_all_metadata(limit: int | None = None) -> list[MapMetadata]:
+    """Lightweight listing: **defers** `archive_bytes` (BYTEA, často MB) aby
+    listing nebyl O(map_count × archive_size) přes síť do ORM.
+
+    `_to_metadata` archive_bytes nepotřebuje, takže defer nikdy nevyvolá
+    dodatečný fetch.
+    """
+    from sqlalchemy import select
+    from sqlalchemy.orm import defer
+
     with Session() as s:
-        maps = maps_repo.list_all(s, limit=limit)
+        stmt = (
+            select(Map)
+            .options(defer(Map.archive_bytes))
+            .order_by(Map.created_at.desc())
+        )
+        if limit:
+            stmt = stmt.limit(limit)
+        maps = s.execute(stmt).scalars().all()
         return [_to_metadata(m) for m in maps]
 
 

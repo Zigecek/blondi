@@ -1,12 +1,13 @@
-"""Hlavní okno aplikace — launcher s třemi velkými tlačítky."""
+"""Hlavní okno aplikace — launcher se stavem DB + Spot spojení a tlačítky."""
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QDialog,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -22,7 +23,7 @@ from spot_operator.config import AppConfig
 from spot_operator.db import ping as db_ping
 from spot_operator.logging_config import get_logger
 from spot_operator.services.map_storage import cleanup_temp_root
-from spot_operator.ui.common.dialogs import error_dialog
+from spot_operator.ui.common.dialogs import confirm_dialog, error_dialog
 from spot_operator.ui.wizards.playback_wizard import PlaybackWizard
 from spot_operator.ui.wizards.recording_wizard import RecordingWizard
 
@@ -32,7 +33,12 @@ _log = get_logger(__name__)
 
 
 class MainWindow(QMainWindow):
-    """Launcher se 3 akcemi: jízda, nahrávání, CRUD (pokud nainstalovaný)."""
+    """Launcher s perzistentním Spot bundle (sdílený napříč wizardy) + DB status.
+
+    Bundle je vytvořen tlačítkem "Připojit se ke Spotovi" nebo auto-trigguje
+    při prvním pokusu spustit wizard. Jakmile je bundle aktivní, oba wizardy
+    dostanou ho v konstruktoru a skipnou Connect krok.
+    """
 
     def __init__(
         self,
@@ -47,6 +53,7 @@ class MainWindow(QMainWindow):
         self._recording_wizard: Optional[RecordingWizard] = None
         self._playback_wizard: Optional[PlaybackWizard] = None
         self._crud_window = None
+        self._bundle: Any | None = None
 
         self.setWindowTitle(f"{__app_name__} {__version__}")
         self.resize(960, 640)
@@ -57,16 +64,26 @@ class MainWindow(QMainWindow):
 
         root = QVBoxLayout(central)
 
-        # Top bar: DB status
+        # ---- Top bar: DB status + Spot status + Connect/Disconnect ----
         top = QHBoxLayout()
+
         self._db_status = QLabel("DB: ?")
         self._db_status.setStyleSheet("padding:4px 8px; font-weight:bold;")
         top.addWidget(self._db_status)
+
+        self._spot_status = QLabel("Spot: 🔴 Nepřipojen")
+        self._spot_status.setStyleSheet("padding:4px 8px; font-weight:bold;")
+        top.addWidget(self._spot_status)
+
+        self._btn_connect_spot = QPushButton("Připojit se ke Spotovi")
+        self._btn_connect_spot.clicked.connect(self._toggle_spot_connection)
+        top.addWidget(self._btn_connect_spot)
+
         top.addStretch(1)
         top.addWidget(QLabel(f"{__app_name__} v{__version__}"))
         root.addLayout(top)
 
-        # Title
+        # ---- Title ----
         title = QLabel(__app_name__)
         title_font = QFont("Segoe UI", 28, QFont.Bold)
         title.setFont(title_font)
@@ -74,7 +91,7 @@ class MainWindow(QMainWindow):
         title.setStyleSheet("padding: 24px 0;")
         root.addWidget(title)
 
-        # Buttons grid
+        # ---- Buttons grid ----
         grid = QGridLayout()
         grid.setSpacing(16)
 
@@ -108,6 +125,87 @@ class MainWindow(QMainWindow):
         self._register_crud_if_available()
         self._start_db_ping_timer()
         self._start_temp_cleanup_timer()
+        self._update_spot_status()
+
+    # ---- Spot connection lifecycle ----
+
+    @property
+    def spot_bundle(self) -> Any | None:
+        """Aktuálně aktivní Spot bundle (nebo None)."""
+        return self._bundle
+
+    def _toggle_spot_connection(self) -> None:
+        if self._bundle is None:
+            self._connect_spot()
+        else:
+            self._disconnect_spot()
+
+    def _connect_spot(self) -> bool:
+        """Otevře modal ConnectDialog. Vrátí True při úspěšném připojení.
+
+        Používá lazy import aby main_window šlo importovat bez autonomy
+        v test režimu.
+        """
+        from spot_operator.ui.common.connect_dialog import ConnectDialog
+
+        dlg = ConnectDialog(self._config, parent=self)
+        if dlg.exec() != QDialog.Accepted:
+            return False
+        if dlg.bundle is None:
+            return False
+        self._bundle = dlg.bundle
+        _log.info("Spot bundle acquired and held by MainWindow.")
+        self._update_spot_status()
+        return True
+
+    def _disconnect_spot(self) -> None:
+        if self._bundle is None:
+            return
+        if self._recording_wizard is not None or self._playback_wizard is not None:
+            error_dialog(
+                self,
+                "Wizard běží",
+                "Nejdřív zavři probíhající wizard — až poté lze Spota odpojit.",
+            )
+            return
+        if not confirm_dialog(
+            self,
+            "Odpojit Spota?",
+            "Ukončí se aktivní session, lease se uvolní, E-Stop se odregistruje.",
+        ):
+            return
+        try:
+            self._bundle.disconnect()
+        except Exception as exc:
+            _log.exception("bundle.disconnect failed: %s", exc)
+        self._bundle = None
+        _log.info("Spot disconnected (by user).")
+        self._update_spot_status()
+
+    def _update_spot_status(self) -> None:
+        if self._bundle is None:
+            self._spot_status.setText("Spot: 🔴 Nepřipojen")
+            self._spot_status.setStyleSheet(
+                "padding:4px 8px; font-weight:bold; color:#c62828;"
+            )
+            self._btn_connect_spot.setText("Připojit se ke Spotovi")
+            return
+        ip = getattr(self._bundle.session, "hostname", None) or getattr(
+            self._bundle.session, "_hostname", None
+        )
+        ip_text = f" ({ip})" if ip else ""
+        self._spot_status.setText(f"Spot: 🟢 Připojen{ip_text}")
+        self._spot_status.setStyleSheet(
+            "padding:4px 8px; font-weight:bold; color:#2e7d32;"
+        )
+        self._btn_connect_spot.setText("Odpojit Spota")
+
+    def _ensure_bundle(self) -> bool:
+        """Wizard helper: pokud není bundle, vynutí ConnectDialog. Vrátí True
+        pokud je bundle nakonec k dispozici."""
+        if self._bundle is not None:
+            return True
+        return self._connect_spot()
 
     # ---- CRUD optional loader ----
 
@@ -133,24 +231,57 @@ class MainWindow(QMainWindow):
     # ---- Wizard launchers ----
 
     def _start_recording(self) -> None:
+        if not self._ensure_bundle():
+            return
         try:
-            wiz = RecordingWizard(self._config, parent=self)
-            wiz.show()
+            wiz = RecordingWizard(
+                self._config, parent=self, bundle=self._bundle
+            )
+            wiz.finished.connect(self._on_wizard_closed)
+            wiz.showMaximized()
             self._recording_wizard = wiz
         except Exception as exc:
             _log.exception("Failed to open RecordingWizard: %s", exc)
             error_dialog(self, "Chyba", str(exc))
 
     def _start_playback(self) -> None:
+        if not self._ensure_bundle():
+            return
         try:
             wiz = PlaybackWizard(
-                self._config, ocr_worker=self._ocr_worker, parent=self
+                self._config,
+                ocr_worker=self._ocr_worker,
+                parent=self,
+                bundle=self._bundle,
             )
-            wiz.show()
+            wiz.finished.connect(self._on_wizard_closed)
+            wiz.showMaximized()
             self._playback_wizard = wiz
         except Exception as exc:
             _log.exception("Failed to open PlaybackWizard: %s", exc)
             error_dialog(self, "Chyba", str(exc))
+
+    def _on_wizard_closed(self, _result: int) -> None:
+        """Po zavření wizardu vynuluj referenci. Bundle zůstává v MainWindow."""
+        sender = self.sender()
+        if sender is self._recording_wizard:
+            self._recording_wizard = None
+        elif sender is self._playback_wizard:
+            self._playback_wizard = None
+        # Refresh status — pro případ že by wizard nakonec bundle zničil
+        # (by shouldn't, ale bezpečnost > performance).
+        if self._bundle is not None:
+            try:
+                # Lightweight check — pokud session není alive, vynuluj.
+                sess = self._bundle.session
+                if sess is None or getattr(sess, "robot", None) is None:
+                    _log.warning(
+                        "Post-wizard: bundle session is dead — discarding."
+                    )
+                    self._bundle = None
+            except Exception:
+                pass
+        self._update_spot_status()
 
     # ---- DB status polling ----
 
@@ -195,6 +326,18 @@ class MainWindow(QMainWindow):
             self._db_status.setStyleSheet(
                 "padding:4px 8px; font-weight:bold; color:#c62828;"
             )
+
+    # ---- Close cleanup ----
+
+    def closeEvent(self, event):  # noqa: D401 - Qt hook
+        """Při zavření hlavního okna disconnectujeme bundle (pokud existuje)."""
+        if self._bundle is not None:
+            try:
+                self._bundle.disconnect()
+            except Exception as exc:
+                _log.warning("MainWindow close: bundle.disconnect failed: %s", exc)
+            self._bundle = None
+        super().closeEvent(event)
 
     # ---- Utils ----
 

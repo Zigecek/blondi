@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -60,6 +61,7 @@ class PhotoConfirmOverlay(QWidget):
             "QWidget#photoConfirmOverlay { border: 2px solid #1565c0; }"
         )
         self.setObjectName("photoConfirmOverlay")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -84,8 +86,9 @@ class PhotoConfirmOverlay(QWidget):
             root.addWidget(lbl)
 
             live = LiveViewWidget(self)
-            live.setMinimumHeight(220)
-            root.addWidget(live)
+            live.setMinimumHeight(360)
+            live.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            root.addWidget(live, stretch=1)
 
             pipeline = ImagePipeline(poller)
             pipeline.set_source(src)

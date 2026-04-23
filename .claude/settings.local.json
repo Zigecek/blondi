@@ -19,7 +19,11 @@
       "Bash(iconv -f UTF-16LE -t UTF-8 c:/Users/zige/spot/build.log)",
       "Read(//tmp/**)",
       "Bash(\"c:/Users/zige/spot/.venv/Scripts/python.exe\" -m pytest \"c:/Users/zige/spot/tests/unit/\" \"c:/Users/zige/spot/tests/integration/test_autonomy_smoke.py\")",
-      "Bash(c:/Users/zige/spot/.venv/Scripts/python.exe -c ' *)"
+      "Bash(c:/Users/zige/spot/.venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe -m py_compile spot_operator/constants.py spot_operator/robot/session_factory.py spot_operator/services/playback_service.py spot_operator/services/map_storage.py spot_operator/db/repositories/photos_repo.py spot_operator/ui/wizards/base_wizard.py spot_operator/ui/wizards/playback_wizard.py spot_operator/ui/wizards/pages/login_page.py spot_operator/ui/wizards/pages/fiducial_page.py spot_operator/ui/wizards/pages/teleop_record_page.py spot_operator/ui/wizards/pages/playback_run_page.py spot_operator/ui/wizards/pages/map_select_page.py spot_operator/ui/wizards/pages/save_map_page.py spot_operator/ui/crud/crud_window.py spot_operator/ui/crud/spz_tab.py spot_operator/ui/crud/runs_tab.py spot_operator/ui/crud/photos_tab.py spot_operator/ui/crud/spz_detail_dialog.py spot_operator/ui/crud/run_detail_dialog.py spot_operator/ui/crud/photo_detail_dialog.py autonomy/app/robot/mobility_state.py)",
+      "Bash(.venv/Scripts/python.exe -c \"import sys; sys.path.insert\\(0, '.'\\); from spot_operator.bootstrap import ROOT; import spot_operator.constants; from spot_operator.ui.crud.spz_tab import SpzTab; from spot_operator.ui.crud.runs_tab import RunsTab; from spot_operator.ui.crud.photos_tab import PhotosTab; from spot_operator.ui.crud.photo_detail_dialog import PhotoDetailDialog; from spot_operator.ui.crud.spz_detail_dialog import SpzDetailDialog; from spot_operator.ui.crud.run_detail_dialog import RunDetailDialog; from spot_operator.ui.crud.crud_window import CrudWindow; from spot_operator.ui.wizards.playback_wizard import PlaybackWizard; from spot_operator.ui.wizards.recording_wizard import RecordingWizard; from spot_operator.robot.session_factory import connect; from spot_operator.services.playback_service import PlaybackService; from app.robot.mobility_state import set_global_avoidance; print\\('OK_IMPORTS'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/unit/ -x -q)"
     ],
     "additionalDirectories": [
       "C:\\Users\\zige\\.claude\\plans"

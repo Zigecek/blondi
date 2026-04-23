@@ -68,7 +68,7 @@ class SaveMapPage(QWizardPage):
 
         root.addWidget(QLabel("Poznámka (volitelné):"))
         self._note_edit = QPlainTextEdit()
-        self._note_edit.setFixedHeight(80)
+        self._note_edit.setMinimumHeight(60)
         root.addWidget(self._note_edit)
 
         action_row = QHBoxLayout()

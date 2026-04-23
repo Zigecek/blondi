@@ -9,6 +9,7 @@ from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import QWidget, QWizard
 
 from spot_operator.config import AppConfig
+from spot_operator.constants import UI_WIZARD_MIN_HEIGHT, UI_WIZARD_MIN_WIDTH
 from spot_operator.logging_config import get_logger
 from spot_operator.ui.common.dialogs import confirm_dialog
 
@@ -35,6 +36,9 @@ class SpotWizard(QWizard):
         super().__init__(parent)
         self._config = config
         self._bundle: Any | None = None
+        # True pokud wizard sám bundle vytvořil (ConnectPage uvnitř).
+        # False pokud bundle dodal MainWindow — při close ho NEdisconnect.
+        self._bundle_owned: bool = True
         self._estop_callback: Optional[Callable[[], None]] = None
         self._estop_release_callback: Optional[Callable[[], None]] = None
 
@@ -43,7 +47,7 @@ class SpotWizard(QWizard):
         self.setOption(QWizard.NoBackButtonOnStartPage, True)
         self.setOption(QWizard.NoCancelButton, False)
         self.setOption(QWizard.HaveHelpButton, False)
-        self.setMinimumSize(1000, 700)
+        self.setMinimumSize(UI_WIZARD_MIN_WIDTH, UI_WIZARD_MIN_HEIGHT)
 
         self._f1_shortcut = QShortcut(QKeySequence("F1"), self)
         self._f1_shortcut.setContext(Qt.ApplicationShortcut)
@@ -60,8 +64,11 @@ class SpotWizard(QWizard):
     def config(self) -> AppConfig:
         return self._config
 
-    def set_bundle(self, bundle: Any) -> None:
+    def set_bundle(self, bundle: Any, *, owned: bool = True) -> None:
+        """Nastaví aktivní bundle. ``owned=False`` znamená externí bundle
+        (typicky z MainWindow) — při close ho nebudeme disconnectovat."""
         self._bundle = bundle
+        self._bundle_owned = bool(owned)
 
     def bundle(self) -> Any | None:
         return self._bundle
@@ -127,13 +134,20 @@ class SpotWizard(QWizard):
             except Exception as exc:
                 _log.exception("Page _teardown failed: %s", exc)
 
-        # 2) Disconnect bundle.
+        # 2) Disconnect bundle — JEN pokud ho wizard vlastní. Externí bundle
+        # z MainWindow má svůj vlastní lifecycle (sdílený napříč wizardy).
         if self._bundle is not None:
-            try:
-                self._bundle.disconnect()
-            except Exception as exc:
-                _log.exception("bundle.disconnect failed: %s", exc)
-            self._bundle = None
+            if self._bundle_owned:
+                try:
+                    self._bundle.disconnect()
+                except Exception as exc:
+                    _log.exception("bundle.disconnect failed: %s", exc)
+                self._bundle = None
+            else:
+                _log.info(
+                    "Wizard close: externí bundle ponecháván pro MainWindow."
+                )
+                self._bundle = None
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: D401
         if self._should_confirm_close():

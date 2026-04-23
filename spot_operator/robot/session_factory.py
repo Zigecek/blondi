@@ -79,6 +79,7 @@ def connect(
     if with_estop:
         try:
             from app.robot.estop import EstopManager
+            from app.robot.lease import LeaseManager
             from app.robot.power import PowerManager
             from bosdyn.client.estop import MotorsOnError
 
@@ -89,21 +90,32 @@ def connect(
                 # Spot motory běží — typicky předchozí crash/instance
                 # je nevypnula, nebo jiný klient má Spot pod sebou. Bosdyn
                 # neumí měnit E-Stop config zatímco motor je ON. Auto-recovery:
-                # power_off + retry estop.start().
+                # získat lease (power_off ho vyžaduje) → power_off → retry
+                # estop.start().
                 _log.warning(
-                    "E-Stop setup: Motors on — auto-recovering "
-                    "(power_off + retry). Spot si sedne."
+                    "E-Stop setup: Motors on — získávám lease a vypínám motory (auto-recovery)."
                 )
                 try:
-                    PowerManager(session).power_off()
-                    _log.info("Motors powered off for E-Stop recovery")
+                    lease = LeaseManager(session)
+                    lease.acquire()
+                    bundle.lease = lease
+                    _log.info("Lease získán pro E-Stop auto-recovery")
                 except Exception as exc:
-                    _log.exception("Auto-recovery power_off failed: %s", exc)
+                    _log.exception("Auto-recovery: lease acquire selhal: %s", exc)
                     raise RuntimeError(
-                        "E-Stop setup selhal (motory on) a auto-recovery "
-                        "power_off taky selhal. Restartuj Spota fyzicky."
+                        "E-Stop setup selhal (motory on) a lease acquire taky selhal. "
+                        "Jiný klient má Spot pod sebou — odpoj ho nebo restartuj Spota."
                     ) from exc
-                # Retry — motor je nyní off.
+                try:
+                    PowerManager(session).power_off()
+                    _log.info("Motory vypnuty pro E-Stop auto-recovery")
+                except Exception as exc:
+                    _log.exception("Auto-recovery power_off selhal: %s", exc)
+                    raise RuntimeError(
+                        "E-Stop setup selhal (motory on) a power_off taky selhal. "
+                        "Restartuj Spota fyzicky."
+                    ) from exc
+                # Retry — motory jsou off.
                 estop = EstopManager(session)
                 estop.start()
 
@@ -112,7 +124,8 @@ def connect(
         except Exception as exc:
             _log.exception("Failed to start E-Stop manager: %s", exc)
 
-    if with_lease:
+    # Lease sekce: skip pokud už byl získán v E-Stop auto-recovery výše.
+    if with_lease and bundle.lease is None:
         try:
             from app.robot.lease import LeaseManager
 

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from spot_operator.config import AppConfig
 from spot_operator.db.engine import Session
 from spot_operator.db.enums import PlateStatus
 from spot_operator.db.repositories import plates_repo
@@ -33,10 +34,19 @@ _log = get_logger(__name__)
 
 
 class SpzTab(QWidget):
-    """Tabulka SPZ + filtry + CRUD dialogy."""
+    """Tabulka SPZ + filtry + CRUD dialogy.
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    Double-click na řádek otevře `SpzDetailDialog` (info + náhled poslední
+    fotky s touto SPZ).
+    """
+
+    def __init__(
+        self,
+        config: Optional[AppConfig] = None,
+        parent: Optional[QWidget] = None,
+    ):
         super().__init__(parent)
+        self._config = config
         root = QVBoxLayout(self)
 
         filter_row = QHBoxLayout()
@@ -75,9 +85,24 @@ class SpzTab(QWidget):
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._table.doubleClicked.connect(self._on_dblclick)
         root.addWidget(self._table)
 
         self._reload()
+
+    def _on_dblclick(self) -> None:
+        """Otevře SpzDetailDialog s info + náhledem poslední fotky."""
+        from PySide6.QtWidgets import QDialog
+
+        from spot_operator.ui.crud.spz_detail_dialog import SpzDetailDialog
+
+        pid = self._selected_id()
+        if pid is None:
+            return
+        dlg = SpzDetailDialog(self._config, pid, parent=self)
+        # Dialog vrací Accepted pokud uživatel klikl "Upravit".
+        if dlg.exec() == QDialog.Accepted and dlg.edit_requested:
+            self._on_edit()
 
     def _reload(self) -> None:
         status = self._status_combo.currentData()

@@ -20,6 +20,7 @@ from typing import Optional
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -32,16 +33,20 @@ from PySide6.QtWidgets import (
 )
 
 from spot_operator.config import AppConfig
-from spot_operator.constants import CAMERA_FRONT_COMPOSITE
+from spot_operator.constants import (
+    CAMERA_FRONT_COMPOSITE,
+    TELEOP_DEFAULT_SPEED_PROFILE,
+    TELEOP_SPEED_LABELS,
+    TELEOP_SPEED_PROFILES,
+    UI_SIDE_PANEL_WIDTH,
+    WASD_AVOIDANCE_STRENGTH,
+)
 from spot_operator.logging_config import get_logger
 from spot_operator.ui.common.dialogs import error_dialog
 from spot_operator.ui.common.estop_floating import EstopFloating
 from spot_operator.ui.common.workers import FunctionWorker
 
 _log = get_logger(__name__)
-
-_WALK_VELOCITY = 0.5  # m/s
-_YAW_VELOCITY = 0.6  # rad/s
 
 
 def _power_on_and_stand(bundle) -> None:  # noqa: ANN001
@@ -82,11 +87,12 @@ class FiducialPage(QWizardPage):
         self._keys_pressed: set[int] = set()
 
         # Velocity keep-alive timer: Spot SDK velocity commands mají default
-        # end_time ~0.6 s. `_CommandDispatcher` z autonomy neopakuje last
-        # command sám — musíme tick každé ~200 ms pokud klávesa je držena,
-        # jinak Spot zastaví po 10 cm.
+        # end_time ~0.5 s (VELOCITY_CMD_DURATION v autonomy). Autonomy tick
+        # je 100 ms = 10 Hz. Používáme stejný interval — při slabší Wi-Fi
+        # (latence 150-300 ms) jinak command expiruje než dorazí k robotu
+        # → ExpiredError + robot na chvíli stojí → seká se WASD i kamera.
         self._velocity_timer = QTimer(self)
-        self._velocity_timer.setInterval(200)
+        self._velocity_timer.setInterval(100)
         self._velocity_timer.timeout.connect(self._on_velocity_tick)
 
         self.setTitle("Kontrola fiducialu")
@@ -110,7 +116,7 @@ class FiducialPage(QWizardPage):
 
         # --- Pravý panel: power-on + WASD hint + check fiducial + status ---
         side = QFrame()
-        side.setFixedWidth(320)
+        side.setFixedWidth(UI_SIDE_PANEL_WIDTH)
         side_layout = QVBoxLayout(side)
 
         step_1 = QLabel("<b>1. Zapnout a postavit Spota</b>")
@@ -148,6 +154,20 @@ class FiducialPage(QWizardPage):
         )
         step_2.setTextFormat(Qt.RichText)
         side_layout.addWidget(step_2)
+
+        # Rychlost pohybu (Slow/Normal/Fast) — mapuje se na m/s + rad/s dle profilu.
+        speed_row = QHBoxLayout()
+        speed_row.addWidget(QLabel("Rychlost:"))
+        self._speed_combo = QComboBox()
+        for key, label in TELEOP_SPEED_LABELS.items():
+            lin, ang = TELEOP_SPEED_PROFILES[key]
+            self._speed_combo.addItem(f"{label} ({lin:.2f} m/s)", key)
+        default_idx = self._speed_combo.findData(TELEOP_DEFAULT_SPEED_PROFILE)
+        if default_idx >= 0:
+            self._speed_combo.setCurrentIndex(default_idx)
+        speed_row.addWidget(self._speed_combo, stretch=1)
+        side_layout.addLayout(speed_row)
+
         self._teleop_hint = QLabel("<i>(aktivuje se po zapnutí Spota)</i>")
         self._teleop_hint.setStyleSheet("color:#888;")
         self._teleop_hint.setTextFormat(Qt.RichText)
@@ -206,6 +226,7 @@ class FiducialPage(QWizardPage):
         self._status.setText("")
         self._update_subtitle()
         self.completeChanged.emit()
+
 
     def isComplete(self) -> bool:
         if self._required_id is None:
@@ -448,20 +469,26 @@ class FiducialPage(QWizardPage):
         self._keys_pressed.discard(event.key())
         self._update_velocity_from_keys()
 
+    def _current_speed(self) -> tuple[float, float]:
+        """Aktuální (linear, angular) speed podle vybraného profile."""
+        key = self._speed_combo.currentData() or TELEOP_DEFAULT_SPEED_PROFILE
+        return TELEOP_SPEED_PROFILES.get(key, TELEOP_SPEED_PROFILES[TELEOP_DEFAULT_SPEED_PROFILE])
+
     def _update_velocity_from_keys(self) -> None:
+        linear, angular = self._current_speed()
         vx = vy = vyaw = 0.0
         if Qt.Key_W in self._keys_pressed:
-            vx += _WALK_VELOCITY
+            vx += linear
         if Qt.Key_S in self._keys_pressed:
-            vx -= _WALK_VELOCITY
+            vx -= linear
         if Qt.Key_A in self._keys_pressed:
-            vy += _WALK_VELOCITY
+            vy += linear
         if Qt.Key_D in self._keys_pressed:
-            vy -= _WALK_VELOCITY
+            vy -= linear
         if Qt.Key_Q in self._keys_pressed:
-            vyaw += _YAW_VELOCITY
+            vyaw += angular
         if Qt.Key_E in self._keys_pressed:
-            vyaw -= _YAW_VELOCITY
+            vyaw -= angular
         self._send_velocity(vx, vy, vyaw)
 
     def _send_velocity(self, vx: float, vy: float, vyaw: float) -> None:
@@ -469,7 +496,9 @@ class FiducialPage(QWizardPage):
         if bundle is None or bundle.move_dispatcher is None:
             return
         try:
-            bundle.move_dispatcher.send_velocity(vx, vy, vyaw)
+            bundle.move_dispatcher.send_velocity(
+                vx, vy, vyaw, avoidance_strength=WASD_AVOIDANCE_STRENGTH
+            )
         except Exception as exc:
             _log.warning("move send_velocity failed: %s", exc)
 

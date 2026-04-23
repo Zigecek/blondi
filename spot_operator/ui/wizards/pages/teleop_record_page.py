@@ -7,6 +7,7 @@ from typing import Optional
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QKeyEvent, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -24,6 +25,12 @@ from spot_operator.constants import (
     CAMERA_RIGHT,
     PREFERRED_LEFT_CANDIDATES,
     PREFERRED_RIGHT_CANDIDATES,
+    TELEOP_DEFAULT_SPEED_PROFILE,
+    TELEOP_SPEED_LABELS,
+    TELEOP_SPEED_PROFILES,
+    UI_PHOTO_OVERLAY_MIN_WIDTH,
+    UI_SIDE_PANEL_WIDTH,
+    WASD_AVOIDANCE_STRENGTH,
     pick_side_source,
 )
 from spot_operator.logging_config import get_logger
@@ -33,10 +40,6 @@ from spot_operator.ui.common.estop_floating import EstopFloating
 from spot_operator.ui.common.photo_confirm_overlay import PhotoConfirmOverlay
 
 _log = get_logger(__name__)
-
-
-_WALK_VELOCITY = 0.5  # m/s
-_YAW_VELOCITY = 0.6  # rad/s
 
 
 class TeleopRecordPage(QWizardPage):
@@ -67,10 +70,12 @@ class TeleopRecordPage(QWizardPage):
         self._camera_right: str = CAMERA_RIGHT
 
         # Velocity keep-alive timer: Spot SDK velocity commands mají default
-        # end_time ~0.6 s. Bez tick každých ~200 ms by Spot zastavil po 10 cm
-        # i když operátor klávesu pořád drží (viz autonomy _CommandDispatcher).
+        # end_time ~0.5 s (VELOCITY_CMD_DURATION v autonomy). Autonomy tick
+        # je 100 ms = 10 Hz. Při slabší Wi-Fi (latence 150-300 ms) pomalejší
+        # tick nestíhá a command expiruje než dorazí → ExpiredError + robot
+        # na chvíli stojí → seká se WASD i kamera.
         self._velocity_timer = QTimer(self)
-        self._velocity_timer.setInterval(200)
+        self._velocity_timer.setInterval(100)
         self._velocity_timer.timeout.connect(self._on_velocity_tick)
 
         root = QHBoxLayout(self)
@@ -91,7 +96,7 @@ class TeleopRecordPage(QWizardPage):
 
         # --- Pravý panel: tlačítka + čítače ---
         side = QFrame()
-        side.setFixedWidth(280)
+        side.setFixedWidth(UI_SIDE_PANEL_WIDTH)
         side_layout = QVBoxLayout(side)
 
         self._status_rec = QLabel("● NAHRÁVÁM")
@@ -127,6 +132,19 @@ class TeleopRecordPage(QWizardPage):
         side_layout.addWidget(self._btn_waypoint)
 
         side_layout.addSpacing(12)
+
+        # Rychlost pohybu (Slow/Normal/Fast) — mapuje se na m/s + rad/s dle profilu.
+        speed_row = QHBoxLayout()
+        speed_row.addWidget(QLabel("Rychlost:"))
+        self._speed_combo = QComboBox()
+        for key, label in TELEOP_SPEED_LABELS.items():
+            lin, ang = TELEOP_SPEED_PROFILES[key]
+            self._speed_combo.addItem(f"{label} ({lin:.2f} m/s)", key)
+        default_idx = self._speed_combo.findData(TELEOP_DEFAULT_SPEED_PROFILE)
+        if default_idx >= 0:
+            self._speed_combo.setCurrentIndex(default_idx)
+        speed_row.addWidget(self._speed_combo, stretch=1)
+        side_layout.addLayout(speed_row)
 
         self._hint = QLabel(
             "<small><b>WASD</b> = pohyb, <b>QE</b> = rotace, "
@@ -312,20 +330,26 @@ class TeleopRecordPage(QWizardPage):
         self._keys_pressed.discard(event.key())
         self._update_velocity_from_keys()
 
+    def _current_speed(self) -> tuple[float, float]:
+        """Aktuální (linear, angular) speed podle vybraného profile."""
+        key = self._speed_combo.currentData() or TELEOP_DEFAULT_SPEED_PROFILE
+        return TELEOP_SPEED_PROFILES.get(key, TELEOP_SPEED_PROFILES[TELEOP_DEFAULT_SPEED_PROFILE])
+
     def _update_velocity_from_keys(self) -> None:
+        linear, angular = self._current_speed()
         vx = vy = vyaw = 0.0
         if Qt.Key_W in self._keys_pressed:
-            vx += _WALK_VELOCITY
+            vx += linear
         if Qt.Key_S in self._keys_pressed:
-            vx -= _WALK_VELOCITY
+            vx -= linear
         if Qt.Key_A in self._keys_pressed:
-            vy += _WALK_VELOCITY
+            vy += linear
         if Qt.Key_D in self._keys_pressed:
-            vy -= _WALK_VELOCITY
+            vy -= linear
         if Qt.Key_Q in self._keys_pressed:
-            vyaw += _YAW_VELOCITY
+            vyaw += angular
         if Qt.Key_E in self._keys_pressed:
-            vyaw -= _YAW_VELOCITY
+            vyaw -= angular
         self._send_velocity(vx, vy, vyaw)
 
     def _send_velocity(self, vx: float, vy: float, vyaw: float) -> None:
@@ -335,7 +359,9 @@ class TeleopRecordPage(QWizardPage):
         try:
             # autonomy `MoveCommandDispatcher.send_velocity(vx, vy, vyaw, ...)` —
             # nevoláme `send()`, ta metoda neexistuje.
-            bundle.move_dispatcher.send_velocity(vx, vy, vyaw)
+            bundle.move_dispatcher.send_velocity(
+                vx, vy, vyaw, avoidance_strength=WASD_AVOIDANCE_STRENGTH
+            )
         except Exception as exc:
             _log.warning("move send_velocity failed: %s", exc)
 
@@ -413,8 +439,14 @@ class TeleopRecordPage(QWizardPage):
         overlay = PhotoConfirmOverlay(bundle, sources, parent=self)
         overlay.confirmed.connect(self._on_photo_confirmed)
         overlay.cancelled.connect(self._on_photo_cancelled)
-        # Pozice: centr parent widgetu, 70% šířky, výška podle obsahu.
-        overlay.resize(int(self.width() * 0.7), overlay.sizeHint().height())
+        # Fullscreen-ish overlay: využij většinu wizard okna.
+        # Maximalizované okno má typicky 1800+ px — overlay 80% šířky, 85% výšky.
+        overlay.setMinimumWidth(UI_PHOTO_OVERLAY_MIN_WIDTH)
+        target_w = max(int(self.width() * 0.8), UI_PHOTO_OVERLAY_MIN_WIDTH)
+        target_w = min(target_w, max(self.width() - 40, UI_PHOTO_OVERLAY_MIN_WIDTH))
+        target_h = max(int(self.height() * 0.85), 500)
+        target_h = min(target_h, max(self.height() - 40, 500))
+        overlay.resize(target_w, target_h)
         overlay.move(
             (self.width() - overlay.width()) // 2,
             (self.height() - overlay.height()) // 2,

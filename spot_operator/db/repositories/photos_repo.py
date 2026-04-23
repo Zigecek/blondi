@@ -52,6 +52,28 @@ def list_for_run(session: Session, run_id: int) -> Sequence[Photo]:
     )
 
 
+def get_last_photo_for_plate(session: Session, plate_text: str) -> Photo | None:
+    """Poslední fotka (captured_at DESC), na které OCR detekoval danou SPZ.
+
+    JOIN přes `plate_detections.plate_text` (registr `license_plates` není
+    FK; detekce nese čistě text. Kdokoli hledá fotky pro SPZ, filtruje po
+    textu.)
+    """
+    from spot_operator.db.models import PlateDetection
+
+    normalized = (plate_text or "").strip().upper()
+    if not normalized:
+        return None
+    stmt = (
+        select(Photo)
+        .join(PlateDetection, PlateDetection.photo_id == Photo.id)
+        .where(PlateDetection.plate_text == normalized)
+        .order_by(Photo.captured_at.desc())
+        .limit(1)
+    )
+    return session.execute(stmt).scalar_one_or_none()
+
+
 def claim_next_pending(session: Session, worker_id: str) -> Photo | None:
     """Najde jednu fotku s ocr_status='pending' a atomicky ji zamkne.
 
@@ -141,6 +163,7 @@ __all__ = [
     "insert",
     "get",
     "list_for_run",
+    "get_last_photo_for_plate",
     "claim_next_pending",
     "mark_done",
     "mark_failed",

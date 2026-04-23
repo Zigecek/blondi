@@ -73,3 +73,30 @@ WIFI_TCP_PORT: int = 443
 PLAYBACK_NAV_TIMEOUT_SEC: float = 30.0
 PLAYBACK_RETURN_HOME_TIMEOUT_SEC: float = 180.0
 PLAYBACK_LOW_BATTERY_PERCENT: int = 15
+
+# --- Obstacle avoidance strength (0–100, mapuje se na padding 0–0.35 m) ---
+# WASD manuální teleop: agresivnější (menší padding ~0.035 m).
+# Autonomní playback: konzervativnější (padding ~0.070 m).
+WASD_AVOIDANCE_STRENGTH: int = 10
+PLAYBACK_AVOIDANCE_STRENGTH: int = 20
+
+# --- Teleop speed profily pro WASD (linear m/s, angular rad/s) ---
+# Sladěno s autonomy/app/constants.py TELEOP_SPEED_PROFILES.
+TELEOP_SPEED_PROFILES: dict[str, tuple[float, float]] = {
+    "slow": (0.25, 0.25),
+    "normal": (0.5, 0.5),
+    "fast": (1.0, 1.0),
+}
+TELEOP_SPEED_LABELS: dict[str, str] = {
+    "slow": "Pomalu",
+    "normal": "Normálně",
+    "fast": "Rychle",
+}
+TELEOP_DEFAULT_SPEED_PROFILE: str = "normal"
+
+# --- UI konstanty (wizardy, side panely, minima okna) ---
+UI_SIDE_PANEL_WIDTH: int = 320
+UI_WIZARD_MIN_WIDTH: int = 1000
+UI_WIZARD_MIN_HEIGHT: int = 700
+UI_ESTOP_BOTTOM_MARGIN: int = 96
+UI_PHOTO_OVERLAY_MIN_WIDTH: int = 600

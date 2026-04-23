@@ -21,6 +21,7 @@ from typing import Any, Optional
 from PySide6.QtCore import QObject, QThread, Signal
 
 from spot_operator.constants import (
+    PLAYBACK_AVOIDANCE_STRENGTH,
     PLAYBACK_NAV_TIMEOUT_SEC,
     PLAYBACK_RETURN_HOME_TIMEOUT_SEC,
     TEMP_ROOT,
@@ -88,8 +89,13 @@ class PlaybackService(QObject):
 
     # ---- Hlavní orchestrace ----
 
-    def prepare_map(self, map_id: int) -> MapMetadata:
-        """Extrahuje mapu z DB, uploadne ji do robota, localize fiducial-nearest."""
+    def upload_map_only(self, map_id: int) -> MapMetadata:
+        """Extrahuje mapu z DB a uploadne ji do robota.
+
+        **Parallel-safe** — netřeba být u fiducialu. Voláme už při vstupu na
+        FiducialPage (operátor zatím dochází ke značce), aby `run` začínal
+        skoro okamžitě.
+        """
         self._emit_progress("Načítám mapu z databáze...")
         map_dir, meta = load_map_to_temp(map_id, TEMP_ROOT)
         self._map_temp_dir = map_dir
@@ -97,10 +103,32 @@ class PlaybackService(QObject):
         self._emit_progress("Uploaduji mapu do robota...")
         self._navigator.upload_map(map_dir)
         self.map_uploaded.emit()
+        return meta
 
+    def localize_on_map(self, meta: MapMetadata) -> None:
+        """Lokalizace robota na nahrané mapě — vyžaduje viditelný fiducial.
+
+        Po úspěšném `set_localization` ověří, že waypoint_id je skutečně
+        z aktuální mapy (belt-and-braces — GraphNav občas "approves" i falešně).
+        """
         self._emit_progress("Lokalizuji robota podle fiducialu...")
         self._localize_with_fallback(meta)
+        if not self._is_localized_on_current_graph():
+            raise RuntimeError(
+                "Lokalizace sice vrátila OK, ale robot není na aktuální mapě. "
+                "Přistup blíž k fiducialu a zkus znovu."
+            )
         self.localized.emit()
+
+    def prepare_map(self, map_id: int) -> MapMetadata:
+        """Backward-compat: upload + localize v sekvenci.
+
+        Při spuštění PlaybackRunPage bez předchozího pre-uploadu (fallback
+        cesta). Nová cesta je `upload_map_only` na FiducialPage →
+        `localize_on_map` na PlaybackRunPage.
+        """
+        meta = self.upload_map_only(map_id)
+        self.localize_on_map(meta)
         return meta
 
     def run_all_checkpoints(
@@ -110,6 +138,16 @@ class PlaybackService(QObject):
         checkpoints = self._extract_checkpoints(meta)
         if not checkpoints:
             raise RuntimeError("Mapa neobsahuje žádné checkpointy.")
+
+        # KRITICKÁ pojistka: pokud robot není lokalizován v aktuální mapě,
+        # `navigate_to` by na základě stale odometrie jel zcela špatným směrem
+        # → timeout → "běží na konec mapy". Abort raději teď, než to způsobí
+        # fyzickou situaci.
+        if not self._is_localized_on_current_graph():
+            raise RuntimeError(
+                "Robot není lokalizován na aktuální mapě. Vrať se k fiducialu "
+                "a zkus playback znovu."
+            )
 
         run_code = runs_repo.generate_run_code()
         with Session() as s:
@@ -127,6 +165,23 @@ class PlaybackService(QObject):
         self.run_started.emit(self._run_id)
         _log.info("Run %s created (map=%s, checkpoints=%d)", run_code, meta.name, len(checkpoints))
 
+        # Nastav globální obstacle avoidance strength pro playback.
+        # GraphNav nepřijímá padding přes TravelParams, ale robot si pamatuje
+        # mobility state → synchro_stand s požadovanou strength to nastaví.
+        try:
+            from app.robot.mobility_state import set_global_avoidance
+
+            set_global_avoidance(self._bundle.session, PLAYBACK_AVOIDANCE_STRENGTH)
+            self._emit_progress(
+                f"Obstacle avoidance nastaveno na strength={PLAYBACK_AVOIDANCE_STRENGTH}."
+            )
+        except Exception as exc:
+            _log.warning(
+                "Nepodařilo se nastavit global avoidance (strength=%d): %s",
+                PLAYBACK_AVOIDANCE_STRENGTH,
+                exc,
+            )
+
         success = 0
         total = len(checkpoints)
         abort_reason: Optional[str] = None
@@ -138,12 +193,19 @@ class PlaybackService(QObject):
             try:
                 self.checkpoint_reached.emit(idx, total, cp.name)
                 self._emit_progress(f"Navigate to {cp.name} ({idx}/{total})")
-                result = self._navigator.navigate_to(
-                    cp.waypoint_id, timeout=PLAYBACK_NAV_TIMEOUT_SEC
-                )
+                result = self._navigate_with_retry(cp)
                 if not result.ok:
                     abort_reason = f"navigate failed at {cp.name}: {result.message}"
                     _log.warning(abort_reason)
+                    # Pokud robot ztratil lokalizaci i po retry, nemá smysl
+                    # pokračovat dalším checkpointem — GraphNav bude stále
+                    # mis-localized a jet špatným směrem.
+                    if result.is_localization_loss:
+                        _log.error(
+                            "Aborting run — robot lost localization and "
+                            "could not recover. Další checkpointy nebudou pokoušeny."
+                        )
+                        break
                     continue
 
                 if cp.kind == "checkpoint" and cp.capture_sources:
@@ -200,6 +262,80 @@ class PlaybackService(QObject):
             self._map_temp_dir = None
 
     # ---- Internal helpers ----
+
+    def _navigate_with_retry(self, cp: "CheckpointRef", max_retries: int = 2):
+        """Wrapper kolem `navigator.navigate_to` s re-localize při LOST.
+
+        Autonomy má podobnou logiku v `_NavigationWorker._navigate_with_retry`.
+        Bez ní při první ztrátě lokalizace v playbacku robot jen pokračuje
+        dalším checkpointem a mis-navigates dál a dál.
+        """
+        attempt = 0
+        last_result = None
+        while attempt <= max_retries:
+            result = self._navigator.navigate_to(
+                cp.waypoint_id, timeout=PLAYBACK_NAV_TIMEOUT_SEC
+            )
+            last_result = result
+            if result.ok:
+                return result
+            if not result.is_localization_loss:
+                # Ne lokalizační problem — retry nemá smysl.
+                return result
+            attempt += 1
+            if attempt > max_retries:
+                break
+            _log.warning(
+                "Navigate to %s failed (%s). Re-localizing and retry %d/%d...",
+                cp.name,
+                result.message,
+                attempt,
+                max_retries,
+            )
+            self._emit_progress(
+                f"Ztracená lokalizace — re-localize (retry {attempt}/{max_retries})"
+            )
+            try:
+                if not self._navigator.relocalize_nearest_fiducial():
+                    _log.warning("Re-localize failed; retry will likely fail too.")
+            except Exception as exc:
+                _log.warning("Re-localize raised: %s", exc)
+        return last_result
+
+    def _is_localized_on_current_graph(self) -> bool:
+        """Ověří přes `get_localization_state`, že robot je na nahraném grafu.
+
+        Waypoint_ids z upload_map jsou cached v navigator. Pokud lokalizace
+        ukazuje na jiný waypoint_id než jsou v grafu, robot je mis-localized
+        (pravděpodobně stale odometrie z předchozího session).
+        """
+        client = getattr(self._bundle.session, "graph_nav_client", None)
+        if client is None:
+            _log.warning("verify_localization: graph_nav_client not available")
+            return False
+        try:
+            state = client.get_localization_state()
+        except Exception as exc:
+            _log.warning("get_localization_state failed: %s", exc)
+            return False
+        wp = getattr(getattr(state, "localization", None), "waypoint_id", "")
+        if not wp:
+            _log.warning("verify_localization: no waypoint_id in state")
+            return False
+        try:
+            known = set(self._navigator.get_waypoint_ids())
+        except Exception as exc:
+            _log.debug("verify_localization: get_waypoint_ids failed: %s", exc)
+            known = set()
+        if known and wp not in known:
+            _log.warning(
+                "verify_localization: robot localized at %s which is NOT in uploaded graph (%d waypoints)",
+                wp,
+                len(known),
+            )
+            return False
+        _log.info("verify_localization: OK at waypoint %s", wp)
+        return True
 
     def _localize_with_fallback(self, meta: MapMetadata) -> None:
         from app.models import LocalizationStrategy

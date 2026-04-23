@@ -128,7 +128,7 @@ def main() -> int:
         from spot_operator.ui.main_window import MainWindow
 
         window = MainWindow(config, ocr_worker=ocr_worker)
-        window.show()
+        window.showMaximized()
         exit_code = app.exec()
     finally:
         if ocr_worker is not None:

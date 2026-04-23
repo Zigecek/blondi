@@ -194,12 +194,45 @@ class RecordingService:
         try:
             self._recorder.stop_recording()
             self._recorder.download_map(tmp_root)
-            checkpoints_json = self._build_checkpoints_json(map_name)
+
+            # KRITICKÉ: Přečti skutečně viděné fiducial IDs z WaypointSnapshot
+            # protobufů (stejně jako autonomy). Bez tohoto by fiducial_id v DB
+            # byl jen "první co operátor viděl před startem", což může být
+            # jiný AprilTag než robot skutečně kotvil — playback pak selhává
+            # se SPECIFIC_FIDUCIAL a robot se mis-lokalizuje.
+            observed_fiducial_id: Optional[int] = None
+            try:
+                from app.robot.graphnav_recording import read_observed_fiducial_ids
+
+                observed = read_observed_fiducial_ids(tmp_root)
+                if observed:
+                    observed_fiducial_id = observed[0]
+                    _log.info(
+                        "Observed fiducial IDs in recorded map: %s (using %d)",
+                        observed,
+                        observed_fiducial_id,
+                    )
+                else:
+                    _log.warning(
+                        "No fiducials observed in waypoint snapshots — "
+                        "falling back to UI fiducial_check value."
+                    )
+            except Exception as exc:
+                _log.warning("read_observed_fiducial_ids failed: %s", exc)
+
+            # Priorita: 1) observed (z grafu), 2) start fiducial (UI check), 3) end fiducial (UI check).
+            effective_fiducial_id = (
+                observed_fiducial_id or self._fiducial_id or end_fiducial_id
+            )
+
+            checkpoints_json = self._build_checkpoints_json(
+                map_name, effective_fiducial_id=effective_fiducial_id
+            )
 
             map_id = save_map_to_db(
                 name=map_name,
                 source_dir=tmp_root,
-                fiducial_id=self._fiducial_id or end_fiducial_id,
+                fiducial_id=effective_fiducial_id,
                 start_waypoint_id=self._start_waypoint_id,
                 default_capture_sources=self._default_capture_sources,
                 checkpoints_json=checkpoints_json,
@@ -221,11 +254,17 @@ class RecordingService:
         self._checkpoints.clear()
         self._start_waypoint_id = None
 
-    def _build_checkpoints_json(self, map_name: str) -> dict:
+    def _build_checkpoints_json(
+        self,
+        map_name: str,
+        effective_fiducial_id: Optional[int] = None,
+    ) -> dict:
         return {
             "map_name": map_name,
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "fiducial_id": self._fiducial_id,
+            "fiducial_id": effective_fiducial_id
+            if effective_fiducial_id is not None
+            else self._fiducial_id,
             "start_waypoint_id": self._start_waypoint_id,
             "default_capture_sources": self._default_capture_sources,
             "checkpoints": [

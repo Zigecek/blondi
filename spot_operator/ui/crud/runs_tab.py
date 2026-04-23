@@ -17,8 +17,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from spot_operator.config import AppConfig
 from spot_operator.db.engine import Session
-from spot_operator.db.repositories import photos_repo, runs_repo
+from spot_operator.db.repositories import runs_repo
 from spot_operator.logging_config import get_logger
 from spot_operator.services.zip_exporter import build_run_zip
 from spot_operator.ui.common.dialogs import error_dialog, info_dialog
@@ -27,10 +28,19 @@ _log = get_logger(__name__)
 
 
 class RunsTab(QWidget):
-    """Tabulka běhů + tlačítka export ZIP."""
+    """Tabulka běhů + tlačítka export ZIP.
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    Double-click na řádek otevře `RunDetailDialog` s tabulkou fotek v běhu.
+    Další double-click na fotku otevře `PhotoDetailDialog`.
+    """
+
+    def __init__(
+        self,
+        config: Optional[AppConfig] = None,
+        parent: Optional[QWidget] = None,
+    ):
         super().__init__(parent)
+        self._config = config
 
         root = QVBoxLayout(self)
 
@@ -53,9 +63,20 @@ class RunsTab(QWidget):
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._table.doubleClicked.connect(self._on_dblclick)
         root.addWidget(self._table)
 
         self._reload()
+
+    def _on_dblclick(self) -> None:
+        """Otevře RunDetailDialog s tabulkou fotek v tomto běhu."""
+        from spot_operator.ui.crud.run_detail_dialog import RunDetailDialog
+
+        rid = self._selected_id()
+        if rid is None:
+            return
+        dlg = RunDetailDialog(self._config, rid, parent=self)
+        dlg.exec()
 
     def _reload(self) -> None:
         try:
