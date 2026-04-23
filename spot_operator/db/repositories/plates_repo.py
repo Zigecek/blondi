@@ -7,6 +7,7 @@ from datetime import date
 from typing import Optional, Sequence
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from spot_operator.db.enums import PlateStatus
@@ -135,24 +136,35 @@ def upsert(
     valid_until: date | None = None,
     note: str | None = None,
 ) -> LicensePlate:
+    """Upsert SPZ. Atomicky — přes ON CONFLICT DO UPDATE (PR-07 FIND-027).
+
+    Dřívější check-then-act vzor měl TOCTOU race mezi dvěma paralelními
+    volajícími. Teď je insert+update jeden atomický statement v PG.
+    """
     plate_text = normalize_plate_text(plate_text)
     if not plate_text:
         raise ValueError("Plate text must not be empty.")
-    existing = get_by_text(session, plate_text)
-    if existing:
-        existing.status = status
-        existing.valid_until = valid_until
-        if note is not None:
-            existing.note = note
-        return existing
-    plate = LicensePlate(
-        plate_text=plate_text,
-        status=status,
-        valid_until=valid_until,
-        note=note,
+    values = {
+        "plate_text": plate_text,
+        "status": status.value if hasattr(status, "value") else status,
+        "valid_until": valid_until,
+    }
+    if note is not None:
+        values["note"] = note
+    stmt = pg_insert(LicensePlate).values(**values)
+    update_values = {
+        "status": stmt.excluded.status,
+        "valid_until": stmt.excluded.valid_until,
+    }
+    if note is not None:
+        update_values["note"] = stmt.excluded.note
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["plate_text"],
+        set_=update_values,
     )
-    session.add(plate)
-    return plate
+    session.execute(stmt)
+    # Reload aktuální row pro vrácení — volající může chtít ID.
+    return get_by_text(session, plate_text)  # type: ignore[return-value]
 
 
 def delete(session: Session, plate_id: int) -> bool:

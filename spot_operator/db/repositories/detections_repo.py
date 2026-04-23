@@ -16,8 +16,13 @@ def insert_many(session: Session, rows: Iterable[dict]) -> int:
 
     Každý row musí mít klíče: photo_id, engine_name, plate_text, detection_confidence,
     text_confidence, bbox, engine_version.
+
+    PR-07 FIND-028: defensive filter — řádky s plate_text=None (nebo prázdné)
+    jsou přeskočeny. Migrace 0003 zavádí NULLS NOT DISTINCT na PG15+, ale
+    i tak bychom nechtěli bloat "prázdných" detekcí. Pipeline upstream
+    filter (Detection.to_db_row raise empty) by měl tohle už chytnout.
     """
-    rows = list(rows)
+    rows = [r for r in rows if r.get("plate_text")]
     if not rows:
         return 0
     stmt = pg_insert(PlateDetection).values(rows).on_conflict_do_nothing(

@@ -62,7 +62,10 @@ class PhotosModel(PagedTableModel):
         if col == 4:
             return row.ocr_status
         if col == 5:
-            return ", ".join(row.plates) if row.plates else "—"
+            # PR-07 FIND-030: repo vrací None pro plate_text=NULL, UI formátuje "?".
+            if not row.plates:
+                return "—"
+            return ", ".join(p if p else "?" for p in row.plates)
         if col == 6:
             return (
                 row.captured_at.isoformat(timespec="seconds")

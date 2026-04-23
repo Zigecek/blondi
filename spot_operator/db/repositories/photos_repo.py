@@ -34,7 +34,11 @@ class DetectionRow:
 
 @dataclass(frozen=True)
 class PhotoRow:
-    """DTO pro řádek v tabulce Fotky (bez BYTEA)."""
+    """DTO pro řádek v tabulce Fotky (bez BYTEA).
+
+    ``plates`` může obsahovat None hodnoty (prázdná detekce / bez textu).
+    UI vrstva formátuje na "?". (PR-07 FIND-030)
+    """
 
     id: int
     run_id: int
@@ -42,7 +46,7 @@ class PhotoRow:
     camera_source: str
     ocr_status: str
     captured_at: datetime | None
-    plates: tuple[str, ...]
+    plates: tuple[str | None, ...]
 
 
 @dataclass(frozen=True)
@@ -97,6 +101,8 @@ def get(session: Session, photo_id: int) -> Photo | None:
 # --- Nové lightweight dotazy pro CRUD (bez BYTEA) ---
 
 def _to_photo_row(photo: Photo) -> PhotoRow:
+    # PR-07 FIND-030: repo vrstva vrací raw data (None místo "?" fallback).
+    # UI layer (photos_model.cell) si vykreslí None jako "?" sama.
     return PhotoRow(
         id=photo.id,
         run_id=photo.run_id,
@@ -104,7 +110,7 @@ def _to_photo_row(photo: Photo) -> PhotoRow:
         camera_source=photo.camera_source,
         ocr_status=photo.ocr_status.value,
         captured_at=photo.captured_at,
-        plates=tuple(d.plate_text or "?" for d in photo.detections),
+        plates=tuple(d.plate_text for d in photo.detections),
     )
 
 
@@ -206,8 +212,14 @@ def fetch_last_image_bytes_for_plate(
 
     Vrací (bytes, run_id, captured_at) nebo None pokud žádná fotka neexistuje.
     Efektivnější než získat celé Photo + samostatně pak image_bytes.
+
+    PR-07 FIND-031: používá sdílený normalize_plate_text (stejně jako
+    plates_repo), aby search s "AB-123" nebo "AB 123" našel shodu
+    (dříve jen .upper().strip() → nekonzistence).
     """
-    normalized = (plate_text or "").strip().upper()
+    from spot_operator.db.repositories.plates_repo import normalize_plate_text
+
+    normalized = normalize_plate_text(plate_text)
     if not normalized:
         return None
     stmt = (
@@ -257,8 +269,9 @@ def get_last_photo_for_plate(session: Session, plate_text: str) -> Photo | None:
     textu.)
     """
     from spot_operator.db.models import PlateDetection
+    from spot_operator.db.repositories.plates_repo import normalize_plate_text
 
-    normalized = (plate_text or "").strip().upper()
+    normalized = normalize_plate_text(plate_text)
     if not normalized:
         return None
     stmt = (
@@ -361,18 +374,24 @@ def reset_all_to_pending(
     worker znovu projel celou frontu. Neresetuje fotky ve stavu `processing`
     (ty vyřeší `sweep_zombies`).
 
+    PR-07 FIND-029: jedno batch DELETE přes IN subquery místo N+1 query
+    smazání detekcí.
+
     Vrací počet resetovaných řádků.
     """
-    from spot_operator.db.repositories import detections_repo
+    from sqlalchemy import delete as sqldelete
 
-    photo_ids_stmt = select(Photo.id).where(
+    # Batch DELETE detekcí — jedním statementem přes subquery.
+    photo_ids_subq = select(Photo.id).where(
         Photo.ocr_status.in_((OcrStatus.done, OcrStatus.failed))
     )
     if run_id is not None:
-        photo_ids_stmt = photo_ids_stmt.where(Photo.run_id == run_id)
-    photo_ids = list(session.execute(photo_ids_stmt).scalars().all())
-    for photo_id in photo_ids:
-        detections_repo.delete_for_photo(session, int(photo_id))
+        photo_ids_subq = photo_ids_subq.where(Photo.run_id == run_id)
+    session.execute(
+        sqldelete(PlateDetection).where(
+            PlateDetection.photo_id.in_(photo_ids_subq)
+        )
+    )
 
     stmt = (
         update(Photo)

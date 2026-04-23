@@ -36,7 +36,13 @@ def save_photo_to_db(
     height: int | None = None,
     image_mime: str = "image/jpeg",
 ) -> int:
-    """Uloží fotku s ocr_status='pending'. OCR worker ji asynchronně zpracuje."""
+    """Uloží fotku s ocr_status='pending'. OCR worker ji asynchronně zpracuje.
+
+    PR-07 FIND-032: photo_id je pouze vrácen, pokud commit byl úspěšný
+    (``with Session() as s`` commituje v ``__exit__`` nebo rollbackuje).
+    Pokud commit selže, exception propaguje ven před ``return`` — volající
+    nedostane invalid photo_id.
+    """
     with Session() as s:
         photo = photos_repo.insert(
             s,
@@ -49,6 +55,7 @@ def save_photo_to_db(
             image_mime=image_mime,
         )
         s.commit()
+        # Commit OK — photo.id je teď persistovaná hodnota.
         photo_id = photo.id
     _log.info(
         "Photo saved: id=%s run=%s cp=%s source=%s bytes=%d",

@@ -2,6 +2,19 @@
 
 Jedna engine instance pro celý proces, thread-local `scoped_session` aby každý thread
 (Qt main, OCR worker, ...) měl svou session.
+
+Key invarianty (PR-07 FIND-014):
+
+- ``expire_on_commit=False`` — po commit zůstávají ORM objekty usable; to je
+  nutné pro pattern ``photos_repo.insert() → session.commit() → return photo.id``.
+  Důsledek: čtení staré instance nemá automatický refresh. Repo funkce
+  **nesmí** propouštět ORM objekty mimo vlastní session — vracet DTO nebo
+  primitiva (viz runs_repo.RunRow, photos_repo.PhotoRow).
+- ``autoflush=False`` — repo kód musí explicitně ``session.flush()``, pokud
+  potřebuje ID generované DB před commit (vzor v ``maps_repo.create`` atd.).
+- Worker threads by měly v ``finally`` své run() volat
+  ``thread_local_session_remove`` aby se neudržovala zombie session po
+  skončení threadu.
 """
 
 from __future__ import annotations

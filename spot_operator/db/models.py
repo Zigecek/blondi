@@ -78,7 +78,9 @@ class Map(Base):
     archive_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     fiducial_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     start_waypoint_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    default_capture_sources: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    default_capture_sources: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
     checkpoints_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     metadata_version: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     archive_is_valid: Mapped[bool] = mapped_column(nullable=False, default=True)
