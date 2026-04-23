@@ -1,12 +1,18 @@
-"""SPZ tab — tabulka registru + filtry + add/edit/delete."""
+"""SPZ tab — QTableView + PlatesModel (async paged) + filtry + add/edit/delete.
+
+Filtr text_contains používá debounce (``CRUD_SEARCH_DEBOUNCE_MS``) aby každá
+písmenka nevyvolala DB dotaz. Finální volání ``PlatesModel.set_filters`` je
+no-op, pokud se filtry nezměnily.
+"""
 
 from __future__ import annotations
 
 from datetime import date
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QModelIndex, QTimer
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -17,28 +23,25 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
-    QTableWidget,
-    QTableWidgetItem,
+    QTableView,
     QVBoxLayout,
     QWidget,
 )
 
 from spot_operator.config import AppConfig
+from spot_operator.constants import CRUD_SEARCH_DEBOUNCE_MS
 from spot_operator.db.engine import Session
 from spot_operator.db.enums import PlateStatus
 from spot_operator.db.repositories import plates_repo
 from spot_operator.logging_config import get_logger
 from spot_operator.ui.common.dialogs import confirm_dialog, error_dialog
+from spot_operator.ui.common.table_models import PlatesModel, apply_default_sort_indicator
 
 _log = get_logger(__name__)
 
 
 class SpzTab(QWidget):
-    """Tabulka SPZ + filtry + CRUD dialogy.
-
-    Double-click na řádek otevře `SpzDetailDialog` (info + náhled poslední
-    fotky s touto SPZ).
-    """
+    """Tabulka SPZ + filtry + CRUD dialogy."""
 
     def __init__(
         self,
@@ -47,19 +50,27 @@ class SpzTab(QWidget):
     ):
         super().__init__(parent)
         self._config = config
+        self._current_dlg = None
+
+        # Debounce timer pro text search — jeden QTimer jako one-shot.
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(CRUD_SEARCH_DEBOUNCE_MS)
+        self._search_timer.timeout.connect(self._apply_filters)
+
         root = QVBoxLayout(self)
 
         filter_row = QHBoxLayout()
         self._search = QLineEdit()
         self._search.setPlaceholderText("Hledat v SPZ...")
-        self._search.textChanged.connect(self._reload)
+        self._search.textChanged.connect(self._on_search_changed)
         filter_row.addWidget(self._search)
 
         self._status_combo = QComboBox()
         self._status_combo.addItem("Všechny statusy", None)
         for st in PlateStatus:
             self._status_combo.addItem(st.value, st)
-        self._status_combo.currentIndexChanged.connect(self._reload)
+        self._status_combo.currentIndexChanged.connect(self._apply_filters)
         filter_row.addWidget(self._status_combo)
 
         self._btn_add = QPushButton("+ Přidat")
@@ -75,74 +86,87 @@ class SpzTab(QWidget):
         filter_row.addWidget(self._btn_delete)
 
         filter_row.addStretch(1)
+        self._status_label = QLabel("")
+        filter_row.addWidget(self._status_label)
         root.addLayout(filter_row)
 
-        self._table = QTableWidget(0, 5)
-        self._table.setHorizontalHeaderLabels(
-            ["ID", "SPZ", "Status", "Platí do", "Poznámka"]
-        )
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self._table.verticalHeader().setVisible(False)
-        self._table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self._table.setSelectionBehavior(QTableWidget.SelectRows)
-        self._table.doubleClicked.connect(self._on_dblclick)
-        root.addWidget(self._table)
+        self._model = PlatesModel(parent=self)
+        self._view = QTableView()
+        self._view.setModel(self._model)
+        self._view.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._view.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._view.setAlternatingRowColors(True)
+        self._view.verticalHeader().setVisible(False)
+        self._view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self._view.doubleClicked.connect(self._on_dblclick)
+        apply_default_sort_indicator(self._view, self._model)
+        self._view.setSortingEnabled(True)
+        self._model.modelReset.connect(self._update_status)
+        self._model.rowsInserted.connect(self._update_status)
+        root.addWidget(self._view)
 
-        self._reload()
+        self._apply_filters()
 
-    def _on_dblclick(self) -> None:
-        """Otevře SpzDetailDialog s info + náhledem poslední fotky."""
-        from PySide6.QtWidgets import QDialog
+    # ---- Lifecycle ----
 
-        from spot_operator.ui.crud.spz_detail_dialog import SpzDetailDialog
+    def closeEvent(self, event) -> None:  # noqa: ANN001
+        self._search_timer.stop()
+        self._model.stop_all_workers()
+        super().closeEvent(event)
 
-        pid = self._selected_id()
-        if pid is None:
-            return
-        dlg = SpzDetailDialog(self._config, pid, parent=self)
-        # Dialog vrací Accepted pokud uživatel klikl "Upravit".
-        if dlg.exec() == QDialog.Accepted and dlg.edit_requested:
-            self._on_edit()
+    # ---- Filtry ----
 
-    def _reload(self) -> None:
+    def _on_search_changed(self, _text: str) -> None:
+        # Restart debounce timeru.
+        self._search_timer.start()
+
+    def _apply_filters(self) -> None:
+        self._search_timer.stop()
         status = self._status_combo.currentData()
         text = self._search.text().strip()
-        try:
-            with Session() as s:
-                rows = plates_repo.list_all(
-                    s, status=status, text_contains=text or None
-                )
-                self._table.setRowCount(len(rows))
-                for i, r in enumerate(rows):
-                    self._set_row(i, r.id, r.plate_text, r.status.value,
-                                  r.valid_until, r.note or "")
-        except Exception as exc:
-            _log.warning("SPZ reload failed: %s", exc)
+        self._model.set_filters(status=status, text_contains=text or None)
 
-    def _set_row(self, row: int, id_: int, text: str, status: str,
-                 valid_until: Optional[date], note: str) -> None:
-        items = [
-            QTableWidgetItem(str(id_)),
-            QTableWidgetItem(text),
-            QTableWidgetItem(status),
-            QTableWidgetItem(valid_until.isoformat() if valid_until else ""),
-            QTableWidgetItem(note),
-        ]
-        for col, it in enumerate(items):
-            it.setData(Qt.UserRole, id_)
-            self._table.setItem(row, col, it)
+    def _update_status(self, *_args) -> None:
+        loaded = self._model.loaded()
+        total = self._model.total()
+        err = self._model.error()
+        if err:
+            self._status_label.setText(f"<span style='color:#c0392b;'>Chyba: {err}</span>")
+        else:
+            self._status_label.setText(f"{loaded} / {total}")
+
+    # ---- Selection helpers ----
 
     def _selected_id(self) -> Optional[int]:
-        sel = self._table.currentRow()
-        if sel < 0:
+        idx = self._view.currentIndex()
+        if not idx.isValid():
             return None
-        item = self._table.item(sel, 0)
-        if item is None:
-            return None
-        try:
-            return int(item.text())
-        except Exception:
-            return None
+        row = self._model.row_at(idx.row())
+        return row.id if row is not None else None
+
+    # ---- CRUD akce ----
+
+    def _on_dblclick(self, index: QModelIndex) -> None:
+        from spot_operator.ui.crud.spz_detail_dialog import SpzDetailDialog
+
+        if not index.isValid():
+            return
+        row = self._model.row_at(index.row())
+        if row is None:
+            return
+        dlg = SpzDetailDialog(self._config, row.id, parent=self)
+        self._current_dlg = dlg
+        dlg.finished.connect(lambda _code: self._on_dlg_finished(dlg))
+        dlg.show()
+
+    def _on_dlg_finished(self, dlg) -> None:  # noqa: ANN001
+        if self._current_dlg is dlg:
+            self._current_dlg = None
+        edit_requested = bool(getattr(dlg, "edit_requested", False))
+        dlg.deleteLater()
+        if edit_requested:
+            self._on_edit()
 
     def _on_add(self) -> None:
         dlg = _SpzEditDialog(self)
@@ -154,7 +178,7 @@ class SpzTab(QWidget):
                     s.commit()
             except Exception as exc:
                 error_dialog(self, "Chyba", str(exc))
-            self._reload()
+            self._model.reset()
 
     def _on_edit(self) -> None:
         pid = self._selected_id()
@@ -181,7 +205,7 @@ class SpzTab(QWidget):
                     s.commit()
             except Exception as exc:
                 error_dialog(self, "Chyba", str(exc))
-            self._reload()
+            self._model.reset()
 
     def _on_delete(self) -> None:
         pid = self._selected_id()
@@ -191,10 +215,13 @@ class SpzTab(QWidget):
             self, "Smazat SPZ?", "Opravdu smazat tento záznam?", destructive=True
         ):
             return
-        with Session() as s:
-            plates_repo.delete(s, pid)
-            s.commit()
-        self._reload()
+        try:
+            with Session() as s:
+                plates_repo.delete(s, pid)
+                s.commit()
+        except Exception as exc:
+            error_dialog(self, "Chyba", str(exc))
+        self._model.reset()
 
 
 class _SpzEditDialog(QDialog):

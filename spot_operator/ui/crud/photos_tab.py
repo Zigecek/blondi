@@ -1,100 +1,117 @@
-"""Fotky tab — tabulka všech fotek + dvojklik na detail (klikatelné detekce)."""
+"""Fotky tab — QTableView + PhotosModel (async paged) + dvojklik na detail.
+
+Oproti původní verzi:
+
+- ``QAbstractTableModel`` místo ``QTableWidget`` → model lazy fetchuje stránku po
+  stránce přes scroll, data plynou v BG threadu bez zamrzání UI.
+- ``PhotosModel`` používá ``photos_repo.list_page_light`` které ``defer``
+  ``image_bytes`` a ``selectinload`` detekce → žádné BYTEA v list SELECTech,
+  žádné N+1.
+- ``PhotoDetailDialog`` je držen jako atribut ``self._current_dlg`` dokud
+  neemituje ``finished``, což zabraňuje GC během re-OCR workeru.
+"""
 
 from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QModelIndex
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QHBoxLayout,
     QHeaderView,
+    QLabel,
     QPushButton,
-    QTableWidget,
-    QTableWidgetItem,
+    QTableView,
     QVBoxLayout,
     QWidget,
 )
 
 from spot_operator.config import AppConfig
-from spot_operator.db.engine import Session
-from spot_operator.db.repositories import detections_repo
 from spot_operator.logging_config import get_logger
+from spot_operator.ui.common.table_models import PhotosModel, apply_default_sort_indicator
 
 _log = get_logger(__name__)
 
 
 class PhotosTab(QWidget):
-    """Tabulka všech fotek napříč běhy + dvojklik = PhotoDetailDialog."""
+    """Tabulka všech fotek (všechny běhy) + dvojklik = PhotoDetailDialog."""
 
     def __init__(self, config: AppConfig, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._config = config
+        self._current_dlg = None  # drží otevřený PhotoDetailDialog před GC
 
         root = QVBoxLayout(self)
+
         controls = QHBoxLayout()
         self._btn_refresh = QPushButton("Obnovit")
         self._btn_refresh.clicked.connect(self._reload)
         controls.addWidget(self._btn_refresh)
         controls.addStretch(1)
+        self._status_label = QLabel("")
+        controls.addWidget(self._status_label)
         root.addLayout(controls)
 
-        self._table = QTableWidget(0, 6)
-        self._table.setHorizontalHeaderLabels(
-            ["ID", "Run", "Checkpoint", "Kamera", "OCR", "Přečteno"]
-        )
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self._table.verticalHeader().setVisible(False)
-        self._table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self._table.setSelectionBehavior(QTableWidget.SelectRows)
-        self._table.doubleClicked.connect(self._on_dblclick)
-        root.addWidget(self._table)
+        self._model = PhotosModel(parent=self)
+        self._view = QTableView()
+        self._view.setModel(self._model)
+        self._view.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._view.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._view.setAlternatingRowColors(True)
+        self._view.verticalHeader().setVisible(False)
+        self._view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self._view.doubleClicked.connect(self._on_dblclick)
+        # Nejprve indicator reflektující model defaults, pak enable — jinak Qt
+        # zavolá model.sort(0, Asc) při enable a přebije nám defaulty.
+        apply_default_sort_indicator(self._view, self._model)
+        self._view.setSortingEnabled(True)
+        self._model.modelReset.connect(self._update_status)
+        self._model.rowsInserted.connect(self._update_status)
+        root.addWidget(self._view)
 
         self._reload()
 
+    # ---- Lifecycle ----
+
+    def closeEvent(self, event) -> None:  # noqa: ANN001 — Qt API
+        self._model.stop_all_workers()
+        super().closeEvent(event)
+
+    # ---- Actions ----
+
     def _reload(self) -> None:
-        try:
-            with Session() as s:
-                from sqlalchemy import select
+        self._model.reset()
 
-                from spot_operator.db.models import Photo
+    def _update_status(self, *_args) -> None:
+        loaded = self._model.loaded()
+        total = self._model.total()
+        err = self._model.error()
+        if err:
+            self._status_label.setText(f"<span style='color:#c0392b;'>Chyba: {err}</span>")
+        else:
+            self._status_label.setText(f"{loaded} / {total}")
 
-                rows = s.execute(
-                    select(Photo).order_by(Photo.captured_at.desc()).limit(500)
-                ).scalars().all()
-                self._table.setRowCount(len(rows))
-                for i, p in enumerate(rows):
-                    dets = detections_repo.list_for_photo(s, p.id)
-                    plate = ", ".join(d.plate_text or "?" for d in dets) or "—"
-                    cells = [
-                        str(p.id),
-                        str(p.run_id),
-                        p.checkpoint_name or "",
-                        p.camera_source,
-                        p.ocr_status.value,
-                        plate,
-                    ]
-                    for col, text in enumerate(cells):
-                        it = QTableWidgetItem(text)
-                        it.setData(Qt.UserRole, p.id)
-                        self._table.setItem(i, col, it)
-        except Exception as exc:
-            _log.warning("Photos reload failed: %s", exc)
-
-    def _on_dblclick(self) -> None:
+    def _on_dblclick(self, index: QModelIndex) -> None:
         from spot_operator.ui.crud.photo_detail_dialog import PhotoDetailDialog
 
-        row = self._table.currentRow()
-        if row < 0:
+        if not index.isValid():
             return
-        item = self._table.item(row, 0)
-        if item is None:
+        row = self._model.row_at(index.row())
+        if row is None:
             return
-        try:
-            pid = int(item.text())
-        except ValueError:
-            return
-        dlg = PhotoDetailDialog(self._config, pid, self)
-        dlg.exec()
+        dlg = PhotoDetailDialog(self._config, row.id, parent=self)
+        self._current_dlg = dlg
+        dlg.finished.connect(lambda _code: self._on_dlg_finished(dlg))
+        dlg.show()
+
+    def _on_dlg_finished(self, dlg) -> None:  # noqa: ANN001
+        # Dialog skončil — uvolni referenci a refresh tabulku
+        # (detekce mohly být změněny re-OCR).
+        if self._current_dlg is dlg:
+            self._current_dlg = None
+        dlg.deleteLater()
         self._reload()
 
 

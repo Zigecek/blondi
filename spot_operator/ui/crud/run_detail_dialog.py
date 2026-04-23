@@ -1,34 +1,39 @@
-"""Run detail dialog — souhrn běhu + tabulka fotek (klikatelná na detail)."""
+"""Run detail dialog — souhrn běhu + tabulka fotek.
+
+Metadata běhu se načítají asynchronně přes ``DbQueryWorker`` (jedno krátké
+SELECT). Tabulka fotek používá ``PhotosModel(run_id=...)`` — stejný paged
+model jako globální fotky tab, jen s filtrem na běh.
+"""
 
 from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QModelIndex
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QPushButton,
-    QTableWidget,
-    QTableWidgetItem,
+    QTableView,
     QVBoxLayout,
     QWidget,
 )
 
 from spot_operator.config import AppConfig
-from spot_operator.db.engine import Session
-from spot_operator.db.repositories import detections_repo, photos_repo, runs_repo
+from spot_operator.db.repositories import runs_repo
 from spot_operator.logging_config import get_logger
+from spot_operator.ui.common.table_models import PhotosModel, apply_default_sort_indicator
+from spot_operator.ui.common.workers import DbQueryWorker
 
 _log = get_logger(__name__)
 
 
 class RunDetailDialog(QDialog):
-    """Detail běhu: metadata + seznam fotek. Double-click fotky → Photo detail."""
+    """Detail běhu: metadata (async) + seznam fotek (paged model)."""
 
     def __init__(
         self,
@@ -39,13 +44,15 @@ class RunDetailDialog(QDialog):
         super().__init__(parent)
         self._config = config
         self._run_id = run_id
+        self._current_dlg = None
+        self._meta_worker: DbQueryWorker | None = None
         self.setWindowTitle(f"Běh #{run_id}")
         self.resize(860, 620)
 
         root = QVBoxLayout(self)
 
         form = QFormLayout()
-        self._lbl_code = QLabel("—")
+        self._lbl_code = QLabel("<i>načítám…</i>")
         self._lbl_map = QLabel("—")
         self._lbl_start = QLabel("—")
         self._lbl_end = QLabel("—")
@@ -62,16 +69,19 @@ class RunDetailDialog(QDialog):
         root.addSpacing(4)
         root.addWidget(QLabel("<b>Fotky v tomto běhu (dvojklik pro detail):</b>"))
 
-        self._table = QTableWidget(0, 6)
-        self._table.setHorizontalHeaderLabels(
-            ["ID", "Checkpoint", "Kamera", "OCR", "Přečteno", "Zachyceno"]
-        )
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self._table.verticalHeader().setVisible(False)
-        self._table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self._table.setSelectionBehavior(QTableWidget.SelectRows)
-        self._table.doubleClicked.connect(self._on_photo_dblclick)
-        root.addWidget(self._table, stretch=1)
+        self._model = PhotosModel(parent=self, run_id=run_id)
+        self._view = QTableView()
+        self._view.setModel(self._model)
+        self._view.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._view.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._view.setAlternatingRowColors(True)
+        self._view.verticalHeader().setVisible(False)
+        self._view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self._view.doubleClicked.connect(self._on_photo_dblclick)
+        apply_default_sort_indicator(self._view, self._model)
+        self._view.setSortingEnabled(True)
+        root.addWidget(self._view, stretch=1)
 
         action_row = QHBoxLayout()
         action_row.addStretch(1)
@@ -80,68 +90,79 @@ class RunDetailDialog(QDialog):
         action_row.addWidget(buttons)
         root.addLayout(action_row)
 
-        self._load()
+        self._start_metadata_load()
+        self._model.reset()
 
-    # ---- Load ----
+    # ---- Lifecycle ----
 
-    def _load(self) -> None:
-        with Session() as s:
-            run = runs_repo.get(s, self._run_id)
-            if run is None:
-                self._lbl_code.setText("<i>Běh nenalezen.</i>")
-                return
-            self._lbl_code.setText(run.run_code)
-            self._lbl_map.setText(run.map_name_snapshot or "—")
-            self._lbl_start.setText(
-                run.start_time.isoformat(timespec="seconds") if run.start_time else "—"
-            )
-            self._lbl_end.setText(
-                run.end_time.isoformat(timespec="seconds") if run.end_time else "—"
-            )
-            self._lbl_status.setText(run.status.value)
-            self._lbl_checkpoints.setText(
-                f"{run.checkpoints_reached}/{run.checkpoints_total}"
-            )
+    def closeEvent(self, event) -> None:  # noqa: ANN001
+        if self._meta_worker is not None:
+            self._meta_worker.stop_and_wait()
+            self._meta_worker = None
+        self._model.stop_all_workers()
+        super().closeEvent(event)
 
-            photos = photos_repo.list_for_run(s, self._run_id)
-            self._table.setRowCount(len(photos))
-            for i, p in enumerate(photos):
-                dets = detections_repo.list_for_photo(s, p.id)
-                plate = ", ".join(d.plate_text or "?" for d in dets) or "—"
-                cells = [
-                    str(p.id),
-                    p.checkpoint_name or "",
-                    p.camera_source,
-                    p.ocr_status.value,
-                    plate,
-                    (
-                        p.captured_at.isoformat(timespec="seconds")
-                        if p.captured_at
-                        else ""
-                    ),
-                ]
-                for col, text in enumerate(cells):
-                    item = QTableWidgetItem(text)
-                    item.setData(Qt.UserRole, p.id)
-                    self._table.setItem(i, col, item)
+    # ---- Metadata (async) ----
+
+    def _start_metadata_load(self) -> None:
+        run_id = self._run_id
+        worker = DbQueryWorker(
+            lambda s: runs_repo.get_summary(s, run_id), parent=self,
+        )
+        worker.ok.connect(self._on_meta_ok)
+        worker.failed.connect(self._on_meta_fail)
+        worker.finished.connect(worker.deleteLater)
+        self._meta_worker = worker
+        worker.start()
+
+    def _on_meta_ok(self, summary) -> None:  # noqa: ANN001 — DTO
+        if not self.isVisible():
+            return
+        if summary is None:
+            self._lbl_code.setText("<i>Běh nenalezen.</i>")
+            return
+        self._lbl_code.setText(summary.run_code)
+        self._lbl_map.setText(summary.map_name_snapshot or "—")
+        self._lbl_start.setText(
+            summary.start_time.isoformat(timespec="seconds")
+            if summary.start_time
+            else "—"
+        )
+        self._lbl_end.setText(
+            summary.end_time.isoformat(timespec="seconds") if summary.end_time else "—"
+        )
+        self._lbl_status.setText(summary.status)
+        self._lbl_checkpoints.setText(
+            f"{summary.checkpoints_reached}/{summary.checkpoints_total}"
+        )
+
+    def _on_meta_fail(self, err: str) -> None:
+        if not self.isVisible():
+            return
+        _log.warning("Run metadata load failed: %s", err)
+        self._lbl_code.setText(f"<span style='color:#c0392b;'>Chyba: {err}</span>")
 
     # ---- Photo double-click → Photo detail ----
 
-    def _on_photo_dblclick(self) -> None:
-        row = self._table.currentRow()
-        if row < 0:
+    def _on_photo_dblclick(self, index: QModelIndex) -> None:
+        if not index.isValid():
             return
-        item = self._table.item(row, 0)
-        if item is None:
-            return
-        try:
-            pid = int(item.text())
-        except ValueError:
+        row = self._model.row_at(index.row())
+        if row is None:
             return
         from spot_operator.ui.crud.photo_detail_dialog import PhotoDetailDialog
 
-        dlg = PhotoDetailDialog(self._config, pid, parent=self)
-        dlg.exec()
+        dlg = PhotoDetailDialog(self._config, row.id, parent=self)
+        self._current_dlg = dlg
+        dlg.finished.connect(lambda _code: self._on_photo_dlg_finished(dlg))
+        dlg.show()
+
+    def _on_photo_dlg_finished(self, dlg) -> None:  # noqa: ANN001
+        if self._current_dlg is dlg:
+            self._current_dlg = None
+        dlg.deleteLater()
+        # Po případném re-OCR obnov seznam (detekce se mohly změnit).
+        self._model.reset()
 
 
 __all__ = ["RunDetailDialog"]

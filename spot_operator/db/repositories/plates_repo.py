@@ -2,14 +2,33 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 from typing import Optional, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from spot_operator.db.enums import PlateStatus
 from spot_operator.db.models import LicensePlate
+
+
+# --- DTO pro CRUD ---
+
+@dataclass(frozen=True)
+class PlateRow:
+    """DTO pro řádek v tabulce SPZ."""
+
+    id: int
+    plate_text: str
+    status: str
+    valid_until: date | None
+    note: str | None
+
+
+_SORTABLE_PLATE_COLS: frozenset[str] = frozenset(
+    {"id", "plate_text", "status", "valid_until"}
+)
 
 
 def normalize_plate_text(text: str) -> str:
@@ -50,6 +69,62 @@ def list_all(
     if limit:
         stmt = stmt.limit(limit)
     return session.execute(stmt).scalars().all()
+
+
+def _apply_filters(stmt, status, text_contains):
+    if status is not None:
+        stmt = stmt.where(LicensePlate.status == status)
+    if text_contains:
+        stmt = stmt.where(LicensePlate.plate_text.contains(text_contains.upper()))
+    return stmt
+
+
+def list_page(
+    session: Session,
+    *,
+    status: PlateStatus | None = None,
+    text_contains: str | None = None,
+    offset: int = 0,
+    limit: int = 100,
+    sort_by: str = "plate_text",
+    sort_desc: bool = False,
+) -> list[PlateRow]:
+    """Stránka SPZ jako lightweight DTO. Bez ``note`` truncation — `note` je Text."""
+    if sort_by not in _SORTABLE_PLATE_COLS:
+        sort_by = "plate_text"
+    col = getattr(LicensePlate, sort_by)
+    order = col.desc() if sort_desc else col.asc()
+
+    stmt = (
+        select(LicensePlate)
+        .order_by(order, LicensePlate.id.asc())
+        .offset(max(offset, 0))
+        .limit(max(limit, 1))
+    )
+    stmt = _apply_filters(stmt, status, text_contains)
+    rows = session.execute(stmt).scalars().all()
+    return [
+        PlateRow(
+            id=r.id,
+            plate_text=r.plate_text,
+            status=r.status.value,
+            valid_until=r.valid_until,
+            note=r.note,
+        )
+        for r in rows
+    ]
+
+
+def count(
+    session: Session,
+    *,
+    status: PlateStatus | None = None,
+    text_contains: str | None = None,
+) -> int:
+    """Počet SPZ odpovídajících filtrům."""
+    stmt = select(func.count(LicensePlate.id))
+    stmt = _apply_filters(stmt, status, text_contains)
+    return int(session.execute(stmt).scalar_one() or 0)
 
 
 def upsert(
@@ -97,9 +172,12 @@ def set_status(session: Session, plate_id: int, status: PlateStatus) -> bool:
 
 
 __all__ = [
+    "PlateRow",
     "normalize_plate_text",
     "get_by_text",
     "list_all",
+    "list_page",
+    "count",
     "upsert",
     "delete",
     "set_status",
