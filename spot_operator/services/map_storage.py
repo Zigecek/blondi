@@ -34,6 +34,18 @@ from spot_operator.services.map_archiver import (
 _log = get_logger(__name__)
 
 
+class MapNameAlreadyExistsError(RuntimeError):
+    """Raise při pokusu o uložení mapy se jménem, které už v DB existuje.
+
+    Samostatná exception class umožňuje SaveMapPage nabídnout retry s jiným
+    jménem bez zbytečného dialog cycle.
+    """
+
+    def __init__(self, name: str):
+        self.name = name
+        super().__init__(f"Mapa s názvem {name!r} už v DB existuje.")
+
+
 @dataclass(frozen=True, slots=True)
 class MapMetadata:
     """Lehký DTO pro čtení z DB bez zatažení celého BYTEA."""
@@ -115,28 +127,36 @@ def save_map_to_db(
     archive, sha = zip_map_dir(source_dir)
     waypoints_count = len(validation.waypoint_ids)
 
+    from sqlalchemy.exc import IntegrityError
+
     with Session() as s:
         if maps_repo.exists_by_name(s, name):
-            raise ValueError(f"Mapa s názvem '{name}' už v DB existuje.")
-        m = maps_repo.create(
-            s,
-            name=name,
-            archive_bytes=archive,
-            archive_sha256=sha,
-            archive_size_bytes=len(archive),
-            fiducial_id=fiducial_id,
-            start_waypoint_id=effective_start_waypoint_id,
-            default_capture_sources=default_capture_sources,
-            checkpoints_json=checkpoints_json,
-            metadata_version=MAP_METADATA_SCHEMA_VERSION,
-            archive_is_valid=True,
-            archive_validation_error=None,
-            waypoints_count=waypoints_count,
-            checkpoints_count=checkpoints_count,
-            note=note,
-            created_by_operator=created_by_operator,
-        )
-        s.commit()
+            raise MapNameAlreadyExistsError(name)
+        try:
+            m = maps_repo.create(
+                s,
+                name=name,
+                archive_bytes=archive,
+                archive_sha256=sha,
+                archive_size_bytes=len(archive),
+                fiducial_id=fiducial_id,
+                start_waypoint_id=effective_start_waypoint_id,
+                default_capture_sources=default_capture_sources,
+                checkpoints_json=checkpoints_json,
+                metadata_version=MAP_METADATA_SCHEMA_VERSION,
+                archive_is_valid=True,
+                archive_validation_error=None,
+                waypoints_count=waypoints_count,
+                checkpoints_count=checkpoints_count,
+                note=note,
+                created_by_operator=created_by_operator,
+            )
+            s.commit()
+        except IntegrityError as exc:
+            # TOCTOU race: někdo jiný insertoval stejné name mezi naším
+            # exists_by_name a commit. Rollback + friendly raise.
+            s.rollback()
+            raise MapNameAlreadyExistsError(name) from exc
         map_id = m.id
 
     _log.info(
@@ -272,6 +292,7 @@ def cleanup_temp_root(temp_root: Path) -> None:
 
 __all__ = [
     "MapMetadata",
+    "MapNameAlreadyExistsError",
     "save_map_to_db",
     "load_map_to_temp",
     "map_extracted",

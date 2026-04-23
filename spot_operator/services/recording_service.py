@@ -51,6 +51,31 @@ class RecordedCheckpoint:
     created_at: str = ""
 
 
+@dataclass(frozen=True)
+class RecordingSnapshot:
+    """Immutable output z ``stop_and_export``.
+
+    Drží referenci na temp adresář se staženou GraphNav mapou + metadata.
+    Volající (SaveMapPage) pak volá ``save_snapshot_to_db(snapshot, ...)``
+    idempotentně — pokud save failne, může se opakovat. Snapshot je retry-safe.
+
+    Temp adresář se maže až po úspěšném save, nebo při explicit
+    ``release_temp()``.
+    """
+
+    temp_dir: Path
+    checkpoints: tuple[RecordedCheckpoint, ...]
+    start_waypoint_id: str | None
+    effective_fiducial_id: int | None
+    default_capture_sources: tuple[str, ...]
+    checkpoint_count: int
+
+    def release_temp(self) -> None:
+        """Smaže temp adresář. Volat po úspěšném save nebo explicit user cancel."""
+        if self.temp_dir.exists():
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+
 class RecordingService:
     """Drží stav jednoho nahrávacího sezení.
 
@@ -242,30 +267,29 @@ class RecordingService:
         )
         return cp
 
-    def stop_and_archive_to_db(
+    def stop_and_export(
         self,
         *,
-        map_name: str,
-        note: str,
-        operator_label: str | None,
-        end_fiducial_id: Optional[int],
-    ) -> int:
-        """Zastaví recording, stáhne GraphNav mapu, uloží ZIP + metadata do DB.
+        end_fiducial_id: Optional[int] = None,
+    ) -> RecordingSnapshot:
+        """Phase 1 two-phase save: zastaví recording + stáhne mapu do temp.
+
+        **Není idempotentní** — volat jen jednou po dokončení recordingu.
+        Výsledný ``RecordingSnapshot`` je immutable a lze ho passnout do
+        ``save_snapshot_to_db`` opakovaně (retry po DB chybě).
 
         Args:
-            map_name: uživatelské jméno mapy (validace mimo).
-            note: poznámka.
-            operator_label: kdo nahrál (optional).
-            end_fiducial_id: ID fiducialu při ukončení (mělo by být == fiducial_id).
+            end_fiducial_id: ID fiducialu při ukončení (z UI re-check na SaveMapPage).
 
         Returns:
-            map_id v DB.
+            RecordingSnapshot s temp_dir a metadaty.
         """
         if not self._recorder.is_recording:
             raise RuntimeError("No recording in progress.")
 
         TEMP_ROOT.mkdir(parents=True, exist_ok=True)
         tmp_root = Path(tempfile.mkdtemp(prefix="rec_", dir=str(TEMP_ROOT)))
+        ok = False
         try:
             self._recorder.stop_recording()
             self._recorder.download_map(tmp_root)
@@ -334,24 +358,91 @@ class RecordingService:
                 observed_fiducial_id or self._fiducial_id or end_fiducial_id
             )
 
-            checkpoints_json = self._build_checkpoints_json(
-                map_name, effective_fiducial_id=effective_fiducial_id
-            )
-
-            map_id = save_map_to_db(
-                name=map_name,
-                source_dir=tmp_root,
-                fiducial_id=effective_fiducial_id,
+            snapshot = RecordingSnapshot(
+                temp_dir=tmp_root,
+                checkpoints=tuple(self._checkpoints),
                 start_waypoint_id=self._start_waypoint_id,
-                default_capture_sources=self._default_capture_sources,
-                checkpoints_json=checkpoints_json,
-                checkpoints_count=self.checkpoint_count,
-                note=note or None,
-                created_by_operator=operator_label or None,
+                effective_fiducial_id=effective_fiducial_id,
+                default_capture_sources=tuple(self._default_capture_sources),
+                checkpoint_count=self.checkpoint_count,
             )
-            return map_id
+            ok = True
+            return snapshot
         finally:
-            shutil.rmtree(tmp_root, ignore_errors=True)
+            if not ok:
+                # Při selhání stop/download smaž temp (nelze retry — recording
+                # je už stopnuté nebo v nekonzistentním stavu).
+                shutil.rmtree(tmp_root, ignore_errors=True)
+
+    def save_snapshot_to_db(
+        self,
+        snapshot: RecordingSnapshot,
+        *,
+        map_name: str,
+        note: str,
+        operator_label: str | None,
+    ) -> int:
+        """Phase 2 two-phase save: uloží snapshot do DB. **Idempotent retry-safe**.
+
+        Pokud save selže (DB error, duplicate name, validation), volající může
+        opakovat s jiným ``map_name`` na stejný snapshot. Temp je smazán
+        **až po úspěchu** (``snapshot.release_temp()``) — operátor neztratí data.
+
+        Args:
+            snapshot: output ze ``stop_and_export``.
+            map_name: jméno mapy (validace mimo).
+            note: poznámka.
+            operator_label: kdo nahrál (optional).
+
+        Returns:
+            map_id v DB.
+        """
+        checkpoints_json = build_checkpoint_plan_payload(
+            map_name=map_name,
+            start_waypoint_id=snapshot.start_waypoint_id,
+            fiducial_id=snapshot.effective_fiducial_id,
+            default_capture_sources=snapshot.default_capture_sources,
+            checkpoints=snapshot.checkpoints,
+        )
+        map_id = save_map_to_db(
+            name=map_name,
+            source_dir=snapshot.temp_dir,
+            fiducial_id=snapshot.effective_fiducial_id,
+            start_waypoint_id=snapshot.start_waypoint_id,
+            default_capture_sources=list(snapshot.default_capture_sources),
+            checkpoints_json=checkpoints_json,
+            checkpoints_count=snapshot.checkpoint_count,
+            note=note or None,
+            created_by_operator=operator_label or None,
+        )
+        # Úspěch — uvolni temp.
+        snapshot.release_temp()
+        return map_id
+
+    def stop_and_archive_to_db(
+        self,
+        *,
+        map_name: str,
+        note: str,
+        operator_label: str | None,
+        end_fiducial_id: Optional[int],
+    ) -> int:
+        """Backward-compat wrapper: stop + save v jednom kroku.
+
+        **Deprecated** — nové UI kódy používají dvoufázový flow
+        (``stop_and_export`` + ``save_snapshot_to_db``), který je retry-safe.
+        """
+        snapshot = self.stop_and_export(end_fiducial_id=end_fiducial_id)
+        try:
+            return self.save_snapshot_to_db(
+                snapshot,
+                map_name=map_name,
+                note=note,
+                operator_label=operator_label,
+            )
+        except Exception:
+            snapshot.release_temp()
+            raise
 
     def abort(self) -> None:
         """Zruší běžící recording bez uložení. Volá se při chybě nebo zavření wizardu.
@@ -408,4 +499,4 @@ class RecordingService:
         return list(self._checkpoints)
 
 
-__all__ = ["RecordingService", "RecordedCheckpoint"]
+__all__ = ["RecordingService", "RecordedCheckpoint", "RecordingSnapshot"]
