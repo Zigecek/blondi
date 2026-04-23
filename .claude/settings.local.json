@@ -4,7 +4,17 @@
       "Bash(\"c:/Users/zige/spot/.venv/Scripts/pip.exe\" freeze *)",
       "Bash(\"c:/Users/zige/spot/.venv/Scripts/python.exe\" -m pytest \"c:/Users/zige/spot/tests/unit/test_pick_side_source.py\" \"c:/Users/zige/spot/tests/unit/test_waypoint_namer.py\" -v)",
       "Bash(\"c:/Users/zige/spot/.venv/Scripts/python.exe\" -m pytest \"c:/Users/zige/spot/tests/integration/test_autonomy_smoke.py\" -v)",
-      "Bash(\"c:/Users/zige/spot/autonomy/.venv/Scripts/pip.exe\" show *)"
+      "Bash(\"c:/Users/zige/spot/autonomy/.venv/Scripts/pip.exe\" show *)",
+      "Bash(cmd.exe /c \"call build_all.bat spot\")",
+      "Bash(cmd.exe /c \"build_all.bat spot > build_spot.log 2>&1 & type build_spot.log\")",
+      "PowerShell(& cmd.exe /c \"build_all.bat spot\" 2>&1)",
+      "PowerShell(Tee-Object -FilePath build_spot.log)",
+      "PowerShell(& cmd.exe /c \".\\\\build_all.bat spot\" 2>&1)",
+      "Bash(/c/Windows/System32/cmd.exe //c \"build_all.bat spot\")",
+      "Bash(/c/Windows/System32/cmd.exe //c \".\\\\\\\\build_all.bat spot\")",
+      "Bash(c:/Users/zige/spot/.venv/Scripts/python.exe --version)",
+      "Bash(/c/Windows/System32/cmd.exe //c \"call .venv\\\\\\\\Scripts\\\\\\\\activate.bat && where pyinstaller && pyinstaller --version && python --version\")",
+      "Read(//c/Users/zige/AppData/Local/Programs/Python/Python312/Lib/site-packages/PyInstaller/bootloader/**)"
     ],
     "additionalDirectories": [
       "C:\\Users\\zige\\.claude\\plans"

@@ -76,6 +76,16 @@ def _apply() -> None:
     _const.LOGS_DIR = exe_dir / "logs"
     _const.TEMP_ROOT = exe_dir / "temp"
 
+    # migrations.py ma ROOT importovany jako `from spot_operator.bootstrap import ROOT`
+    # a pouziva ho pro alembic.ini + alembic/ — to jsou BUNDLED resources (lezi v
+    # _MEIPASS, ne vedle .exe). Prepsani bootstrap.ROOT na exe_dir tyhle cesty
+    # rozbije. Donutime import migrations a prepiseme jeho lokalni ROOT na meipass.
+    try:
+        from spot_operator.db import migrations as _mig
+        _mig.ROOT = meipass
+    except Exception:
+        pass
+
     # _verify_presence kontroluje soubory pod puvodnim ROOT — v bundlu jsou
     # pod _MEIPASS/autonomy a _MEIPASS/ocr, a my ROOT prepisujeme na exe_dir.
     # Noop je tady OK, protoze jsme uz sami naimportovali zprava v kroku 1.
