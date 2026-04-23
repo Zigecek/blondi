@@ -45,7 +45,7 @@ odkudkoli připojí ke stejné DB a vidí totéž.
 | Pojem | Definice |
 |---|---|
 | **Waypoint** | Bod v GraphNav mapě. Bez fotky. Pojmenovaný `WP_NNN`. |
-| **Checkpoint** | Waypoint **s přiřazenou fotkou** (nebo více). Pojmenovaný `CP_NNN`. V `maps.checkpoints_json[*]`. |
+| **Checkpoint** | Waypoint **s alespoň jednou úspěšně uloženou fotkou**. Pojmenovaný `CP_NNN`. V `maps.checkpoints_json[*]`. Při capture failure **nedochází** k silent demotion na waypoint — operátor rozhodne retry / skip / cancel dialogem (PR-02). |
 | **Fiducial** | AprilTag marker v prostředí (černobílý čtverec). ID je integer (typicky 1–100). Slouží k lokalizaci Spota. |
 | **Run** | Jedno spuštění playbacku mapy. Řádek v `spot_runs`. Unikátní `run_code` (např. `run_20260422_1530`). |
 | **capture_sources** | Per-checkpoint seznam jmen Spot image sources (`left_fisheye_image` / `right_fisheye_image` / oba) použitých pro focení na daném checkpointu. Operátor volí v teleopu individuálně přes klávesy **V / N / B** (vlevo / vpravo / obě) nebo tlačítka. Před uložením se zobrazí `PhotoConfirmOverlay` s live preview. Mapa samotná má v `default_capture_sources` obě strany (fallback pro playback). |
@@ -57,6 +57,24 @@ odkudkoli připojí ke stejné DB a vidí totéž.
 | **Additive (úprava autonomy)** | Přidání nového souboru/modulu do `autonomy/app/robot/` bez úpravy existujících souborů. |
 
 ---
+
+## Recording protocol (povinný flow pro operátora)
+
+Aby playback správně lokalizoval robot, recording musí dodržet následující
+pořadí (PR-02 FIND-072 — jinak hrozí "robot jede na vzdálený CP"):
+
+1. **U startu u fiducialu** stiskni nejprve **Waypoint (C)**. Tím se
+   explicitně pojmenuje startovní bod mapy (`start_waypoint_id`).
+   Foto tlačítka (V / N / B) jsou záměrně disabled dokud není aspoň 1
+   Waypoint — to zabraňuje tomu, aby se první CP omylem stal startem.
+2. Projděte trasu s WASD / QE a přidávejte další Waypointy (C) a
+   Checkpointy (V/N/B — foto vlevo/vpravo/obě).
+3. Pokud capture selže (kamera nedostupná), UI nabídne dialog
+   **Retry / Přeskočit / Zrušit**. Přeskočit vytvoří explicit Waypoint
+   bez fotky — žádný silent demotion.
+4. V **Dokončit** projdi do SaveMapPage, kde se Phase 1 (stop + download)
+   stane automaticky. Pokud Phase 2 (save do DB) selže, snapshot zůstává
+   a save lze zkusit znovu (PR-04) — operátor neztrácí nahrávku.
 
 ## Architektonická rozhodnutí
 

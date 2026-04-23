@@ -14,6 +14,164 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-04-24
+
+Velký reliability + UX harden based na code_review 196 findings.
+15 PR (safety stoppers → tech debt). Žádné breaking changes pro operátora
+kromě recording flow (Waypoint musí být první).
+
+### Safety
+
+- E-Stop `on_release` je **povinný** parametr (dřív Optional — bez
+  callbacku widget lhal že je uvolněný, ale robot byl fyzicky stále
+  v E-Stop).
+- `SpotBundle.disconnect` má per-krok 3 s timeout přes ThreadPoolExecutor
+  — UI už nezamrzne při zavření wizardu s odpojeným Wi-Fi.
+- `MainWindow.closeEvent` idempotentně stopuje timery + disconnect bundle.
+  Navíc registruje `QApplication.aboutToQuit` pro OS kill signály.
+- `PowerManager.power_off` následuje `wait_until_powered_off` (max 10 s)
+  — `estop.start` už nepadne na MotorsOnError kvůli async power-off.
+- `trigger_estop` fallback bez widget/bundle: flash title + ERROR log
+  (už ne silent no-op).
+
+### Recording reliability (root cause hlášeného "robot jede náhodně")
+
+- **Foto tlačítka (V/N/B) jsou disabled dokud operátor nestiskne Waypoint
+  (C).** Tím je zaručené, že `start_waypoint_id` patří explicit startovnímu
+  bodu u fiducialu. FiducialNotFoundError / mis-localize scénáře výrazně
+  méně.
+- Capture failure: UI dialog Retry / Přeskočit (explicit Waypoint) /
+  Zrušit místo silent demotion na kind=waypoint se stejným jménem.
+- Recording `start()` resetuje `_checkpoints` + `_start_waypoint_id`
+  — idempotent re-use instance.
+- `abort()` retryuje `stop_recording` 1× s delay při selhání.
+- 0 waypointů blokuje Dokončit (hard-block místo confirm dialog).
+
+### Playback reliability
+
+- Run v DB vytvořen **před** pre-flight checks → audit trail i neúspěšných
+  pokusů (CRUD → Běhy ukáže).
+- Retry whitelist rozšířen o `STUCK` a `NO_ROUTE` (recoverable po
+  re-localize).
+- `_is_robot_lost_error` zkouší `isinstance(exc, RobotLostError)` před
+  substring match.
+- Drift warning emit přes `drift_detected` Qt signál (UI může zobrazit).
+- Avoidance set failure: `avoidance_failed` signál + UI může nabídnout
+  pokračovat nebo abort.
+- `return_home` pre-check `_is_localized_on_current_graph`.
+- DB error klasifikace: `OperationalError` (transient) → continue,
+  `ProgrammingError` (schema) → break.
+- `_classify_final_status`: `success==total` vítězí nad abort — user
+  aborted po dokončení → status completed.
+- FIDUCIAL_NEAREST fallback: ověřuje `_is_localized_on_current_graph`
+  + waypoint match.
+
+### Two-phase save (retry-safe)
+
+- `RecordingService.stop_and_export` → `RecordingSnapshot`.
+- `RecordingService.save_snapshot_to_db(snapshot, ...)` — idempotent.
+- SaveMapPage Phase 1 automaticky při initializePage; Phase 2 na Uložit,
+  retry-able při DB failure (dřív ztráta celé nahrávky).
+- `MapNameAlreadyExistsError` typed exception + friendly dialog.
+
+### OCR worker robustness
+
+- `PermanentOcrError` pro FileNotFoundError / ModuleNotFoundError —
+  emit `worker_disabled` signál + loop exit místo nekonečného backoff.
+- Heartbeat thread během `pipeline.process` (každých 60 s) — sweep_zombies
+  nezresetuje běžící OCR → double processing fix.
+- Periodic sweep timer (10 min) + threading.Event pro rychlé probuzení
+  z backoff.
+- `cv2.imdecode` failure → raise (worker mark_failed, operator vidí status).
+- YoloDetector + FastPlateReader: thread-safe `_ensure_loaded` s lock.
+- FastPlateReader.read: refactor 3→2 nested try/except.
+- `_normalize_plate`: aplikuje `PLATE_TEXT_REGEX` (max 16 znaků, alnum).
+- Fallback OCR: PyInstaller-frozen check + timeout 60 s + logged unlink.
+
+### DB hardening
+
+- Alembic `0003_schema_cleanup`: obnovuje server_defaults (migrace 0002
+  je omylem ALTER-ovala na None). NULLS NOT DISTINCT pro plate_detections
+  unique constraint (PG15+) s expression index fallback.
+- `create_run_with_unique_code`: atomic retry na IntegrityError
+  (TOCTOU race mezi `generate_unique_run_code` a insert).
+- `plates_repo.upsert`: ON CONFLICT DO UPDATE místo check-then-act.
+- `photos_repo.reset_all_to_pending`: single batch DELETE místo N+1.
+- `photos_repo.record_heartbeat`: nová metoda pro OCR worker.
+- `photos_repo._to_photo_row`: bez UI fallback ("?" formátuje UI layer).
+- `photos_repo.fetch_last_image_bytes_for_plate`: sdílený
+  `normalize_plate_text` — "AB-123" teď najde "AB123".
+- `detections_repo.insert_many`: defensive skip plate_text=None.
+- Engine module docstring: invariants kolem `expire_on_commit=False`.
+- `thread_local_session_remove`: helper pro worker threads.
+- `runs_repo.mark_progress/finish`: raise při rowcount != 1.
+
+### Config & Wi-Fi
+
+- `LOG_LEVEL` validace (whitelist).
+- `_require_float` helper s range check + CZ errors.
+- Opt-in DB keyring: `DATABASE_URL_TEMPLATE` s `{password}` +
+  `DATABASE_PASSWORD_KEYRING_KEY` (backward compat s `DATABASE_URL`).
+- `spot_wifi._ping`: locale-independent (N × single-ping s returncode).
+- `WifiCheckResult.ok` jen `tcp_reachable` (ICMP může být firewall).
+
+### Qt signal lifecycle
+
+- PlaybackRunPage teardown: disconnect všech PlaybackService signálů.
+- PlaybackRunPage `_on_ocr_done`: DB query v BG worker (UI nesekne).
+- PlaybackRunPage `_on_run_failed`: Next vždy enabled (ResultPage si poradí).
+- SaveMapPage: debounce `_is_name_valid` přes QTimer.
+- PagedTableModel workers: `_remove_worker` v finished slot — memory leak fix.
+- `cleanup_worker`: finished→deleteLater před stop_and_wait.
+
+### Wizard typed state
+
+- `WalkWizardState` nová dataclass (FiducialPage už nepotřebuje Qt property
+  fallback).
+- `PlaybackWizardState.detected_fiducial_id` (rename z matoucího
+  `fiducial_id`; zpětně kompatibilní property zachována).
+- `recording_state()/playback_state()/walk_state()`: raise místo assert
+  (v -O mode by skipl).
+- `_should_confirm_close` dle lifecycle (ne vždy když bundle existuje).
+- F1 shortcut: `Qt.WindowShortcut` místo ApplicationShortcut.
+- `SpotBundle.get_info()` dedup (3 wizardy měly kopie).
+- `ui/wizards/messages.py` centralizace CZ textů.
+
+### Autonomy kontrakty
+
+- `robot/contracts.py`: Protocol (NavigationResult, ImagePoller, Session,
+  LeaseManager) — static type check při upgrade autonomy.
+- `robot/graphnav_fiducial.py`: wrapper nad autonomy internal
+  `read_observed_fiducial_ids`.
+- `connect_partial`: odstraněny dead flags `with_lease` / `with_estop`.
+
+### Testy
+
+- 9 nových unit test souborů (PR-14) — end-to-end recording flow,
+  plan invariants, capture failure, E-Stop contract, power poll,
+  normalize plate regex, wifi tcp-only, disconnect timeout,
+  config validation.
+
+### Tech debt + UX polish
+
+- `CaptureNote` enum (OK / CAPTURE_FAILED / CAPTURE_PARTIAL) místo magic
+  strings.
+- `encode_bgr_to_jpeg`: podpora grayscale + contiguous BGR→RGB.
+- CRUD tables: lokální formát timestamps ("23. 04. 2026 15:30").
+- `photo_detail_dialog` re-OCR: button debounce.
+- Map_archiver: zip whitelist (vyloučit .tmp/.swp/hidden), velký
+  archive přes temp file.
+- Map_storage: `safe_rmtree` s retry (Windows filelock).
+- Recording protocol popsaný v `instructions.md`.
+
+### Removed / dead code
+
+- `capture_sources` silent demotion v recording_service.
+- `recording_finished` dead signal v teleop_record_page.
+- `count_waypoints_in_map_dir` (nikde se nevolalo).
+- Duplicate `if localized_wp != ...` v `_localize_with_fallback`.
+- `if cp.waypoint_id` dead filter v `_extract_checkpoints`.
+
 ## [1.3.0] — 2026-04-23
 
 Nová UX feature: photo confirm overlay. Breaking change ve shortcutech

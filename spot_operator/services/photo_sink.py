@@ -15,12 +15,27 @@ _log = get_logger(__name__)
 
 
 def encode_bgr_to_jpeg(image_bgr: np.ndarray, *, quality: int = 85) -> tuple[bytes, int, int]:
-    """Převod OpenCV BGR ndarray na JPEG bytes. Vrátí (bytes, width, height)."""
+    """Převod OpenCV ndarray na JPEG bytes. Vrátí (bytes, width, height).
+
+    PR-15 FIND-080/081: tolerantní na shape — grayscale (H,W) i BGR (H,W,3).
+    4+ channel data raise ValueError. BGR→RGB swap produkuje contiguous
+    array (PIL na non-contiguous view může selhat na některých buildech).
+    """
     if image_bgr is None or image_bgr.size == 0:
         raise ValueError("Empty image, cannot encode.")
-    rgb = image_bgr[:, :, ::-1]  # BGR → RGB (OpenCV → Pillow)
-    height, width = rgb.shape[:2]
-    img = Image.fromarray(rgb)
+    if image_bgr.ndim == 2:
+        # Grayscale.
+        height, width = image_bgr.shape
+        img = Image.fromarray(image_bgr)
+    elif image_bgr.ndim == 3 and image_bgr.shape[2] == 3:
+        rgb = np.ascontiguousarray(image_bgr[:, :, ::-1])
+        height, width = rgb.shape[:2]
+        img = Image.fromarray(rgb)
+    else:
+        raise ValueError(
+            f"Unsupported image shape: {image_bgr.shape} "
+            "(očekáván grayscale 2D nebo BGR 3-kanálový 3D array)"
+        )
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=quality, optimize=True)
     return buf.getvalue(), width, height

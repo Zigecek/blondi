@@ -6,6 +6,7 @@ from typing import Optional
 
 from spot_operator.db.repositories import runs_repo
 from spot_operator.db.repositories.runs_repo import RunRow
+from spot_operator.ui.common.table_models._format import format_local_datetime
 from spot_operator.ui.common.table_models.paged_table_model import PagedTableModel
 
 
@@ -40,15 +41,9 @@ class RunsModel(PagedTableModel):
         if col == 2:
             return row.map_name_snapshot or ""
         if col == 3:
-            return (
-                row.start_time.isoformat(timespec="seconds")
-                if row.start_time
-                else ""
-            )
+            return format_local_datetime(row.start_time)
         if col == 4:
-            return (
-                row.end_time.isoformat(timespec="seconds") if row.end_time else ""
-            )
+            return format_local_datetime(row.end_time)
         if col == 5:
             return row.status
         if col == 6:

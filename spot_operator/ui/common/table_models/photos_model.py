@@ -10,6 +10,10 @@ from typing import Optional
 
 from spot_operator.db.repositories import photos_repo
 from spot_operator.db.repositories.photos_repo import PhotoRow
+from spot_operator.ui.common.table_models._format import (
+    format_local_datetime,
+    format_optional_plate,
+)
 from spot_operator.ui.common.table_models.paged_table_model import PagedTableModel
 
 
@@ -62,16 +66,13 @@ class PhotosModel(PagedTableModel):
         if col == 4:
             return row.ocr_status
         if col == 5:
-            # PR-07 FIND-030: repo vrací None pro plate_text=NULL, UI formátuje "?".
+            # PR-07 FIND-030: repo vrací None pro plate_text=NULL.
             if not row.plates:
                 return "—"
-            return ", ".join(p if p else "?" for p in row.plates)
+            return ", ".join(format_optional_plate(p) for p in row.plates)
         if col == 6:
-            return (
-                row.captured_at.isoformat(timespec="seconds")
-                if row.captured_at
-                else ""
-            )
+            # PR-15 FIND-170: lokální formát místo UTC ISO.
+            return format_local_datetime(row.captured_at)
         return ""
 
     def initial_load(

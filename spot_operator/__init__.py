@@ -4,5 +4,5 @@ Kombinuje Boston Dynamics Spot autonomy (nahrávání/playback map) s OCR rozpoz
 českých SPZ. Všechna data (mapy, fotky, detekce, registry SPZ) jsou v PostgreSQL.
 """
 
-__version__ = "0.1.0"
+__version__ = "1.4.0"
 __app_name__ = "Spot Operator"
