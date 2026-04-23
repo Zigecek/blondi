@@ -280,7 +280,18 @@ class RecordingService:
             try:
                 from app.robot.graphnav_recording import read_observed_fiducial_ids
 
-                observed_list = list(read_observed_fiducial_ids(tmp_root))
+                try:
+                    observed_list = list(read_observed_fiducial_ids(tmp_root))
+                except Exception as exc:
+                    # PR-03 FIND-075: fiducial observation read je
+                    # kritické pro playback localize. Silent warning +
+                    # fallback by znamenalo nekorektní fiducial_id v DB.
+                    # Raise s CZ zprávou — uživatel uvidí dialog v SaveMapPage.
+                    raise RuntimeError(
+                        "Nelze přečíst observované fiducialy z mapy "
+                        f"(protobuf chyba: {exc}). Mapa by se uložila s potenciálně "
+                        "nesprávným fiducial_id. Zkus recording znovu."
+                    ) from exc
                 # KRITICKÉ pořadí volby fiducial_id pro playback-lokalizaci:
                 #   1) self._fiducial_id (UI fiducial_check PŘED start recording)
                 #      POKUD je taky v `observed_list` — user fyzicky ověřil,
@@ -307,8 +318,14 @@ class RecordingService:
                         "No fiducials observed in waypoint snapshots — "
                         "falling back to UI fiducial_check value."
                     )
-            except Exception as exc:
-                _log.warning("read_observed_fiducial_ids failed: %s", exc)
+            except ImportError as exc:
+                # Autonomy API není dostupné — loguj, nehas save úplně
+                # (spot_operator v test módu může běžet bez full autonomy).
+                _log.warning(
+                    "read_observed_fiducial_ids import failed: %s — "
+                    "fallback na UI fiducial hodnoty.",
+                    exc,
+                )
 
             # Priorita: 1) verified observed (z grafu + UI match),
             #           2) start fiducial (UI check only — pokud snapshots nic nenašly),

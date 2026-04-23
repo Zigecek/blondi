@@ -164,11 +164,21 @@ def parse_checkpoint_plan(
     fallback_default_capture_sources: Sequence[str],
     fallback_fiducial_id: int | None,
 ) -> MapPlan:
+    from spot_operator.logging_config import get_logger
+    _log_contracts = get_logger(__name__)
+
     payload = raw or {}
     if not isinstance(payload, dict):
         raise ValueError("Map checkpoints payload must be an object.")
 
     schema_version = _normalize_schema_version(payload.get("schema_version"))
+    if schema_version > MAP_METADATA_SCHEMA_VERSION:
+        # Forward-compat warning — zachovat import-time lazy log.
+        _log_contracts.warning(
+            "Map schema version %d is newer than supported %d; some fields may be ignored.",
+            schema_version,
+            MAP_METADATA_SCHEMA_VERSION,
+        )
     map_name = _as_optional_str(payload.get("map_name")) or fallback_map_name
     start_waypoint_id = (
         _as_optional_str(payload.get("start_waypoint_id")) or fallback_start_waypoint_id
@@ -255,6 +265,9 @@ def parse_checkpoint_results(raw: Sequence[dict[str, Any]] | None) -> tuple[Chec
     for idx, item in enumerate(raw):
         if not isinstance(item, dict):
             raise ValueError(f"Checkpoint result #{idx + 1} is not an object.")
+        # Timestamps jsou tolerantní — legacy záznamy bez started_at/finished_at
+        # se neprojeví jako hard fail při čtení (FIND-042). Při write cesta stále
+        # vyžaduje datetime (build_checkpoint_result).
         out.append(
             CheckpointResult(
                 name=_required_str(item.get("name"), f"checkpoint_results[{idx}].name"),
@@ -274,17 +287,53 @@ def parse_checkpoint_results(raw: Sequence[dict[str, Any]] | None) -> tuple[Chec
                 saved_sources=_normalize_sources(item.get("saved_sources") or ()),
                 failed_sources=_normalize_sources(item.get("failed_sources") or ()),
                 error=_as_optional_str(item.get("error")),
-                started_at=_required_str(
-                    item.get("started_at"),
-                    f"checkpoint_results[{idx}].started_at",
-                ),
-                finished_at=_required_str(
-                    item.get("finished_at"),
-                    f"checkpoint_results[{idx}].finished_at",
-                ),
+                started_at=_as_optional_str(item.get("started_at")) or "",
+                finished_at=_as_optional_str(item.get("finished_at")) or "",
             )
         )
     return tuple(out)
+
+
+def validate_plan_invariants(plan: MapPlan) -> None:
+    """Raise ValueError pokud ``plan`` porušuje logické invarianty.
+
+    Kontroluje:
+      1. ``start_waypoint_id`` existuje v ``plan.checkpoints[].waypoint_id``
+         (pokud je nastavený — None je OK jen pro prázdné plány).
+      2. Žádné duplikátní ``name`` napříč checkpointy.
+      3. Žádné duplikátní ``waypoint_id``.
+      4. Aspoň 1 checkpoint (prázdný plán je validní jen při save ještě
+         ne-zaznamenaných map — save_map_to_db to další kontrolou filtruje).
+
+    Volá se v ``save_map_to_db`` před INSERT, aby se sémanticky rozbitá mapa
+    nikdy nedostala do DB.
+    """
+    if not plan.checkpoints:
+        raise ValueError(
+            "Mapa nemá žádné checkpointy — recording pravděpodobně skončil "
+            "předčasně nebo operátor nekliknul ani jeden waypoint/checkpoint."
+        )
+
+    waypoint_ids: set[str] = set()
+    names: set[str] = set()
+    for idx, cp in enumerate(plan.checkpoints):
+        if cp.name in names:
+            raise ValueError(
+                f"Checkpoint #{idx + 1}: duplikátní jméno {cp.name!r}."
+            )
+        names.add(cp.name)
+        if cp.waypoint_id in waypoint_ids:
+            raise ValueError(
+                f"Checkpoint #{idx + 1} ({cp.name!r}): duplikátní waypoint_id "
+                f"{cp.waypoint_id!r}."
+            )
+        waypoint_ids.add(cp.waypoint_id)
+
+    if plan.start_waypoint_id and plan.start_waypoint_id not in waypoint_ids:
+        raise ValueError(
+            f"start_waypoint_id {plan.start_waypoint_id!r} není v seznamu "
+            "checkpoint waypoint_ids — mapa je nekonzistentní."
+        )
 
 
 def validate_sources_known(
@@ -306,7 +355,16 @@ def _extract_fiducial_id(payload: dict[str, Any], fallback: int | None) -> int |
     if "fiducial" in payload:
         fiducial = payload.get("fiducial") or {}
         if fiducial is not None and not isinstance(fiducial, dict):
-            raise ValueError("Map fiducial block must be an object.")
+            # Legacy / manually edited payload může mít "fiducial": <int>
+            # místo "fiducial": {"id": <int>}. Tolerujeme jako shortcut.
+            if isinstance(fiducial, int) and not isinstance(fiducial, bool):
+                from spot_operator.logging_config import get_logger
+                get_logger(__name__).warning(
+                    "Legacy fiducial block as scalar int (%d) — interpreted as {'id': %d}.",
+                    fiducial, fiducial,
+                )
+                return fiducial
+            raise ValueError("Map fiducial block must be an object or integer.")
         return _as_optional_int((fiducial or {}).get("id"), fallback)
     return _as_optional_int(payload.get("fiducial_id"), fallback)
 
@@ -319,6 +377,10 @@ def _normalize_schema_version(value: Any) -> int:
 def _normalize_sources(value: Sequence[str] | Any) -> tuple[str, ...]:
     if value is None:
         return ()
+    # Legacy: některé starší záznamy mohou mít capture_sources jako scalar
+    # string místo list (PR-03 FIND-040).
+    if isinstance(value, str):
+        value = [value]
     if not isinstance(value, (list, tuple)):
         raise ValueError("Capture sources must be a list of strings.")
     out: list[str] = []
@@ -352,8 +414,15 @@ def _as_optional_int(value: Any, fallback: int | None = None) -> int | None:
         raise ValueError("Boolean is not a valid integer value.")
     if isinstance(value, int):
         return value
-    if isinstance(value, str) and value.strip():
-        return int(value.strip())
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            # Prázdný string == hodnota nezadaná (PR-03 FIND-039).
+            return fallback
+        try:
+            return int(stripped)
+        except ValueError as exc:
+            raise ValueError(f"Expected integer, got empty or non-numeric string: {value!r}") from exc
     raise ValueError(f"Expected integer, got {type(value).__name__}.")
 
 
@@ -378,5 +447,6 @@ __all__ = [
     "build_checkpoint_result",
     "checkpoint_results_to_payload",
     "parse_checkpoint_results",
+    "validate_plan_invariants",
     "validate_sources_known",
 ]

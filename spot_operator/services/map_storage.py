@@ -23,6 +23,7 @@ from spot_operator.logging_config import get_logger
 from spot_operator.services.contracts import (
     MAP_METADATA_SCHEMA_VERSION,
     parse_checkpoint_plan,
+    validate_plan_invariants,
 )
 from spot_operator.services.map_archiver import (
     extract_map_archive,
@@ -90,15 +91,27 @@ def save_map_to_db(
         fallback_default_capture_sources=default_capture_sources,
         fallback_fiducial_id=fiducial_id,
     )
+    # Semantic validace — kontroluje duplicitní jména, start_waypoint_id
+    # přítomnost v checkpoints, atd. Hodí ValueError s CZ zprávou
+    # (PR-03 FIND-037).
+    validate_plan_invariants(plan)
+
     effective_start_waypoint_id = start_waypoint_id or plan.start_waypoint_id
     if not effective_start_waypoint_id:
         raise ValueError("Mapa nemá start_waypoint_id a nelze ji bezpečně uložit.")
 
-    validation = validate_map_dir(
-        source_dir,
-        expected_start_waypoint_id=effective_start_waypoint_id,
-        checkpoint_waypoint_ids=[cp.waypoint_id for cp in plan.checkpoints],
-    )
+    try:
+        validation = validate_map_dir(
+            source_dir,
+            expected_start_waypoint_id=effective_start_waypoint_id,
+            checkpoint_waypoint_ids=[cp.waypoint_id for cp in plan.checkpoints],
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        # Wrap bosdyn/archiver errors do CZ zprávy pro user dialog
+        # (PR-03 FIND-058).
+        raise RuntimeError(
+            f"Mapa je neúplná nebo poškozená: {exc}"
+        ) from exc
     archive, sha = zip_map_dir(source_dir)
     waypoints_count = len(validation.waypoint_ids)
 

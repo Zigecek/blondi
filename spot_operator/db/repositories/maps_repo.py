@@ -69,6 +69,25 @@ def list_all(session: Session, *, limit: int | None = None) -> Sequence[Map]:
     return session.execute(stmt).scalars().all()
 
 
+def list_all_validated(
+    session: Session,
+    *,
+    limit: int | None = None,
+    include_invalid: bool = False,
+) -> Sequence[Map]:
+    """Jako ``list_all`` ale default vyfiltruje mapy s ``archive_is_valid=False``.
+
+    PR-03 FIND-020: operátor by neměl vidět mapy, které při posledním pokusu
+    selhaly validaci. Admin UI může explicit set ``include_invalid=True``.
+    """
+    stmt = select(Map).order_by(Map.created_at.desc())
+    if not include_invalid:
+        stmt = stmt.where(Map.archive_is_valid.is_(True))
+    if limit:
+        stmt = stmt.limit(limit)
+    return session.execute(stmt).scalars().all()
+
+
 def delete(session: Session, map_id: int) -> bool:
     m = session.get(Map, map_id)
     if m is None:
@@ -105,6 +124,7 @@ __all__ = [
     "get",
     "get_by_name",
     "list_all",
+    "list_all_validated",
     "delete",
     "exists_by_name",
     "update_validation",
