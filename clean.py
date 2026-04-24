@@ -8,16 +8,18 @@ Spuštění:
     python clean.py --help        # nápověda
 
 Co se maže:
-    - __pycache__ rekurzivně v celém stromu
+    - __pycache__ rekurzivně v celém stromu (i uvnitř build/runtime_hooks/)
     - .pytest_cache, .mypy_cache, .ruff_cache, .tox, htmlcov
     - *.pyc, *.pyo, *.pyd rekurzivně
-    - build/, dist/, logs/, temp/ (root-only)
+    - dist/, logs/, temp/ (root-only)
     - .venv/, venv/ (virtualenv — není portable, třeba re-setup)
     - build.log, build_v5.log, .coverage (root-only)
 
 Co NESMAŽE (nechá tam):
     - .git/ — historie commitů
     - .claude/ — uživatelské Claude Code nastavení
+    - build/ — SOURCE (PyInstaller .spec + runtime hooks + README);
+      uvnitř se jen vyčistí __pycache__
     - zdrojový kód (.py, .md, .txt, .ini, .cfg, .bat)
     - modely (.pt, .pb, .onnx, .pth, .h5)
     - requirements.txt, alembic migrace
@@ -61,8 +63,12 @@ RECURSIVE_FILE_SUFFIXES: frozenset[str] = frozenset({
 })
 
 # Adresáře smazané pouze v rootu projektu.
+# POZOR: ``build/`` **NEmažeme** — v tomto projektu jde o SOURCE adresář
+# s PyInstaller specs / runtime hooks / README, ne build output.
+# PyInstaller ukládá temp output do ``build/<name>/`` — pokud by ho
+# někdo chtěl smazat, musí ho identifikovat ručně. ``dist/`` je
+# skutečný output PyInstalleru (EXE), to mažeme.
 ROOT_ONLY_DIRS: tuple[str, ...] = (
-    "build",
     "dist",
     ".venv",
     "venv",
@@ -79,13 +85,14 @@ ROOT_ONLY_FILES: tuple[str, ...] = (
 )
 
 # Do těchto adresářů se při rekurzi vůbec nelezeme.
+# Do ``build/`` LEZEME, protože tam mohou být __pycache__ v runtime_hooks/
+# (jediné co chceme uklidit) — samotné *.spec / *.py / README zůstávají.
 SKIP_DESCENT_INTO: frozenset[str] = frozenset({
     ".git",
     ".claude",
     ".venv",
     "venv",
-    "build",  # smazán jako celek, nelezeme dovnitř
-    "dist",
+    "dist",  # smazán jako celek, nelezeme dovnitř
 })
 
 
