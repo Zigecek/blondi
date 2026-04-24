@@ -267,6 +267,7 @@ class PlaybackRunPage(QWizardPage):
                     "progress", "run_started", "checkpoint_reached",
                     "photo_taken", "run_completed", "run_failed",
                     "drift_detected", "avoidance_failed",
+                    "obstacle_detected",
                 ):
                     sig = getattr(self._service, sig_name, None)
                     if sig is None:
@@ -423,6 +424,44 @@ class PlaybackRunPage(QWizardPage):
             return
         wizard.next()
 
+    def _on_obstacle_detected(self, cp_name: str, outcome: str) -> None:
+        """Fix 2: Spot narazil na překážku — zeptat se operátora.
+
+        Signál `obstacle_detected` je doručen queued connection z worker
+        threadu. Worker zatím blokuje v `_wait_for_obstacle_decision` — jakmile
+        zvolíme, voláme `resume_after_obstacle()` / `cancel_after_obstacle()`
+        na service a worker se odblokne.
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        self._append_log(
+            f"⏸ Překážka na {cp_name} ({outcome}) — čekám na rozhodnutí"
+        )
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Překážka na trase")
+        box.setText(
+            f"Spot nemůže projet na <b>{cp_name}</b> "
+            f"(důvod: <i>{outcome}</i>)."
+        )
+        box.setInformativeText(
+            "Pravděpodobně vidí překážku nebo osobu. Uvolněte cestu před "
+            "Spotem a klikněte Pokračovat. Po kliknutí se Spot pokusí "
+            "znovu navigovat na stejný waypoint.\n\n"
+            "Pokud chcete jízdu ukončit, klikněte Zrušit jízdu."
+        )
+        resume_btn = box.addButton("Pokračovat", QMessageBox.AcceptRole)
+        box.addButton("Zrušit jízdu", QMessageBox.RejectRole)
+        box.exec()
+        if self._service is None:
+            return
+        if box.clickedButton() is resume_btn:
+            self._append_log(f"▶ {cp_name}: pokračuji (re-localize + retry)")
+            self._service.resume_after_obstacle()
+        else:
+            self._append_log(f"✗ {cp_name}: jízda zrušena operátorem")
+            self._service.cancel_after_obstacle()
+
     def _append_log(self, text: str) -> None:
         self._log_list.addItem(text)
         self._log_list.scrollToBottom()
@@ -444,6 +483,8 @@ class PlaybackRunPage(QWizardPage):
         self._service.run_failed.connect(
             lambda reason: self._append_log(f"⚠ Chyba: {reason}")
         )
+        # Fix 2: obstacle pause dialog.
+        self._service.obstacle_detected.connect(self._on_obstacle_detected)
 
         # Propojení OCR worker signálů — live feedback v log listu.
         if self._ocr_worker is not None and not self._ocr_signals_connected:

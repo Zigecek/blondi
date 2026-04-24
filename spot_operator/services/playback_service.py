@@ -13,6 +13,7 @@ Emituje Qt signály pro UI:
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -76,6 +77,9 @@ class PlaybackService(QObject):
     drift_detected = Signal(str, str, str)  # cp_name, actual_wp, target_wp
     # PR-05 FIND-104: avoidance setting failure — UI rozhodne pokračovat.
     avoidance_failed = Signal(str)
+    # Obstacle pause (Fix 1): emit když navigate_to selže s STUCK/TIMEOUT/NO_ROUTE.
+    # UI zobrazí dialog a volá resume_after_obstacle() / cancel_after_obstacle().
+    obstacle_detected = Signal(str, str)  # (checkpoint_name, outcome_value)
 
     def __init__(self, bundle: Any, parent: QObject | None = None):
         super().__init__(parent)
@@ -95,6 +99,10 @@ class PlaybackService(QObject):
         self._checkpoint_results: list[CheckpointResult] = []
         self._last_run_status: Optional[RunStatus] = None
         self._last_abort_reason: Optional[str] = None
+        # Obstacle pause handshake (Fix 1): worker thread blokuje na Event,
+        # UI thread emit obstacle_detected, operátor volí resume/cancel.
+        self._obstacle_event = threading.Event()
+        self._obstacle_resume_choice: bool = False
 
     @property
     def navigator(self) -> Any:
@@ -114,10 +122,47 @@ class PlaybackService(QObject):
 
     def request_abort(self) -> None:
         self._abort_requested = True
+        # Pokud worker čeká na obstacle pause event, odblokuj ho jako "cancel".
+        # Bez toho by zůstal viset v _wait_for_obstacle_decision (abort by se
+        # aplikoval až po doručení navigate_to timeoutu — zbytečné čekání).
+        self._obstacle_resume_choice = False
+        self._obstacle_event.set()
         try:
             self._navigator.request_abort()
         except Exception as exc:
             _log.warning("navigator.request_abort failed: %s", exc)
+
+    def resume_after_obstacle(self) -> None:
+        """UI callback po dialogu: operátor zvolil 'Pokračovat'. Odblokuje
+        worker thread v `_wait_for_obstacle_decision` → re-localize + retry."""
+        self._obstacle_resume_choice = True
+        self._obstacle_event.set()
+
+    def cancel_after_obstacle(self) -> None:
+        """UI callback po dialogu: operátor zvolil 'Zrušit jízdu'. Abort."""
+        self._obstacle_resume_choice = False
+        self._abort_requested = True
+        self._obstacle_event.set()
+
+    def _wait_for_obstacle_decision(self, cp_name: str, outcome_value: str) -> bool:
+        """Emit obstacle_detected do UI a blokuj dokud operátor nevybere.
+
+        Vrátí True pokud zvolil pokračovat (retry), False pokud cancel/abort.
+        """
+        self._obstacle_event.clear()
+        self._obstacle_resume_choice = False
+        _log.info(
+            "Obstacle pause: emituji obstacle_detected(%s, %s) — čekám na volbu UI.",
+            cp_name,
+            outcome_value,
+        )
+        self.obstacle_detected.emit(cp_name, outcome_value)
+        # Blokuj dokud UI nezavolá resume_after_obstacle / cancel_after_obstacle.
+        # Bez timeoutu — operátor může chvilku potřebovat na uvolnění cesty.
+        self._obstacle_event.wait()
+        if self._abort_requested:
+            return False
+        return self._obstacle_resume_choice
 
     def request_return_home(self) -> None:
         """DEPRECATED: dřívější alias pro request_abort.
@@ -279,7 +324,6 @@ class PlaybackService(QObject):
         success = 0
         total = len(checkpoints)
         abort_reason: Optional[str] = None
-        consecutive_nav_fails = 0
 
         for idx, cp in enumerate(checkpoints, start=1):
             started_at = datetime.now(timezone.utc)
@@ -304,7 +348,6 @@ class PlaybackService(QObject):
                         finished_at=datetime.now(timezone.utc),
                     )
                     self._record_checkpoint_result(checkpoint_result, success)
-                    consecutive_nav_fails += 1
                     abort_reason = f"navigate failed at {cp.name}: {result.message}"
                     _log.warning(abort_reason)
 
@@ -323,22 +366,36 @@ class PlaybackService(QObject):
                         )
                         break
 
-                    # SAFETY NET: 3 po sobě jdoucí selhání = systémový problém
-                    # (mis-localizace, fyzická překážka), nemá smysl pokračovat.
-                    if consecutive_nav_fails >= 3:
+                    # Fix 3: ROBOT_IMPAIRED (typicky po E-STOP) — všechny další
+                    # navigate_to selžou, neztrácet čas dalšími pokusy.
+                    from app.models import NavigationOutcome
+
+                    if result.outcome == NavigationOutcome.ROBOT_IMPAIRED:
                         _log.error(
-                            "Aborting run — %d po sobě jdoucích selhání "
-                            "navigace. Robot je pravděpodobně mis-localized "
-                            "nebo má fyzickou překážku.",
-                            consecutive_nav_fails,
+                            "Robot impaired (%s) — abort run. Pravděpodobně byl "
+                            "stisknutý E-STOP nebo došlo k perception/behavior "
+                            "fault. Uvolni E-STOP, power-on Spota a spusť znovu.",
+                            result.message,
+                        )
+                        self._emit_progress(
+                            "⚠ Spot je v chybovém stavu (motory vypnuty / E-STOP). "
+                            "Run zrušen."
+                        )
+                        abort_reason = (
+                            f"robot impaired at {cp.name}: {result.message}"
                         )
                         break
 
-                    # RECOVERABLE (TIMEOUT, STUCK, NO_ROUTE, LOST): zkus další
-                    # CP. GraphNav se občas probere i po neúspěšném retry —
-                    # log 2026-04-23 18:43 potvrzuje že TIMEOUT u WP_001 může
-                    # být jen chvilkový.
-                    continue
+                    # Fix 1c: odstranili jsme tichý `continue` na další CP.
+                    # Když _navigate_with_retry vrátí fail a operátor zvolil
+                    # "Zrušit jízdu" v pause dialogu, nebo fail je jiný terminální
+                    # stav, abortujeme run. Operátor tak nikdy neuvidí Spota
+                    # potichu skákat po mapě po první chybě.
+                    _log.warning(
+                        "Navigate to %s selhalo (%s) — abort run.",
+                        cp.name, result.outcome.value,
+                    )
+                    break
 
                 # Po úspěšném navigate_to — kontrola drift před capture.
                 self._warn_if_drift(cp)
@@ -367,7 +424,6 @@ class PlaybackService(QObject):
                 )
                 if checkpoint_result.is_complete:
                     success += 1
-                consecutive_nav_fails = 0
                 self._record_checkpoint_result(checkpoint_result, success)
             except (KeyboardInterrupt, MemoryError, SystemExit):
                 # Kritické exceptions propagujeme — v žádném případě
@@ -528,22 +584,26 @@ class PlaybackService(QObject):
         return outcome in retryable
 
     def _navigate_with_retry(self, cp: "CheckpointRef", max_retries: int = 2):
-        """Wrapper kolem `navigator.navigate_to` s re-localize při LOST/TIMEOUT.
+        """Navigate_to s obstacle pause (Fix 1) a omezeným re-localize retry.
 
-        Autonomy má podobnou logiku v `_NavigationWorker._navigate_with_retry`.
-        Bez ní při první ztrátě lokalizace v playbacku robot jen pokračuje
-        dalším checkpointem a mis-navigates dál a dál.
+        Flow:
+          1. navigate_to → pokud ok, hotovo.
+          2. Pokud non-retryable outcome (ROBOT_IMPAIRED, ERROR, …) → return.
+          3. Pokud terminální `RobotLostError` → return (main loop to zpracuje).
+          4. Jinak (STUCK/TIMEOUT/NO_ROUTE/LOST/NOT_LOCALIZED):
+             emit obstacle_detected → blokuj na UI volbu operatora.
+             - Resume: re-localize + navigate_to retry (až max_retries pokusů).
+             - Cancel: abort, return current result.
         """
         attempt = 0
         last_result = None
         while attempt <= max_retries:
+            if self._abort_requested:
+                return last_result
             result = self._navigator.navigate_to(
                 cp.waypoint_id, timeout=PLAYBACK_NAV_TIMEOUT_SEC
             )
             last_result = result
-            # Diagnostický log: kde robot skončil po navigate_to volání.
-            # Při bugu "jede na nejvzdálenější místo" tohle ukáže, kam to
-            # GraphNav reálně odvezlo.
             post_wp = self._current_localization_waypoint()
             _log.info(
                 "Navigate to %s (target=%s...) → outcome=%s, robot now at waypoint %s",
@@ -553,21 +613,32 @@ class PlaybackService(QObject):
             if result.ok:
                 return result
             if not self._should_retry_outcome(result):
-                # Ne lokalizační / timeout problem — retry nemá smysl.
                 return result
+            # RobotLostError — terminální, hlavní smyčka to zpracuje.
+            if self._is_robot_lost_error(result):
+                return result
+
             attempt += 1
             if attempt > max_retries:
                 break
-            _log.warning(
-                "Navigate to %s failed (%s). Re-localizing and retry %d/%d...",
-                cp.name,
-                result.message,
-                attempt,
-                max_retries,
+
+            # Pause + UI dialog. Worker čeká, UI thread emituje resume/cancel.
+            self._emit_progress(
+                f"⏸ {cp.name}: {result.outcome.value} — "
+                "zastaveno, čekám na rozhodnutí operátora"
+            )
+            resume = self._wait_for_obstacle_decision(cp.name, result.outcome.value)
+            if not resume:
+                _log.info("Operator cancelled after obstacle at %s", cp.name)
+                self._emit_progress(f"{cp.name}: zrušeno operátorem.")
+                return result
+
+            _log.info(
+                "Operator resume after obstacle at %s — re-localize + retry %d/%d",
+                cp.name, attempt, max_retries,
             )
             self._emit_progress(
-                f"{cp.name}: {result.outcome.value} — re-localize + retry "
-                f"{attempt}/{max_retries}"
+                f"{cp.name}: pokračuji — re-localize + retry {attempt}/{max_retries}"
             )
             # Preferuj STRICT re-localize (hint na start_waypoint + FIDUCIAL_SPECIFIC).
             # Pokud fiducial není vidět nebo strict selže, fallback na NEAREST.

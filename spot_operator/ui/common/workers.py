@@ -17,6 +17,7 @@ zabránili Qt chybě *QThread: Destroyed while thread is still running*.
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Callable
 
 from PySide6.QtCore import QObject, QThread, Signal
@@ -42,11 +43,16 @@ class _WorkerBase(QThread):
             signals = self._lifecycle_signals()
         except RuntimeError:
             return
-        for sig in signals:
-            try:
-                sig.disconnect()
-            except (TypeError, RuntimeError):
-                pass
+        # `sig.disconnect()` bez slotu emituje RuntimeWarning, když signál
+        # nemá žádný connect — to je validní stav (workery se zavírají před
+        # tím, než UI kód stihl connect). Potlačit, ať log není zahlcený.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            for sig in signals:
+                try:
+                    sig.disconnect()
+                except (TypeError, RuntimeError):
+                    pass
         try:
             running = self.isRunning()
         except RuntimeError:

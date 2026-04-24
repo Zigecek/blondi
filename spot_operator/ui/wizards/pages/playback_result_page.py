@@ -127,6 +127,13 @@ class PlaybackResultPage(QWizardPage):
                 marker in abort_reason.lower()
                 for marker in ROBOT_LOST_ERROR_MARKERS
             )
+            # Fix 4: run skončil kvůli E-STOP / impaired stavu.
+            abort_lower = abort_reason.lower()
+            impaired_reason = (
+                "impaired" in abort_lower
+                or "estop" in abort_lower
+                or "e-stop" in abort_lower
+            )
             if lost_reason:
                 self._tip_box.setText(
                     "⚠ <b>Robot ztratil GraphNav lokalizaci během jízdy.</b><br>"
@@ -140,6 +147,20 @@ class PlaybackResultPage(QWizardPage):
                     "překročit mez.</li>"
                     "<li>Spusť playback <b>znovu</b> z fiducialu — s trochou "
                     "štěstí projde (drift je stochastický).</li>"
+                    "</ul>"
+                )
+                self._tip_box.setVisible(True)
+            elif impaired_reason:
+                self._tip_box.setText(
+                    "⚠ <b>Run byl zastaven kvůli E-STOP / robot impaired stavu.</b><br>"
+                    "<br>"
+                    "Motory jsou vypnuty. Před dalším pokusem:"
+                    "<ul>"
+                    "<li>Klikni na <b>E-STOP widget</b> (v triggered stavu) pro "
+                    "uvolnění, nebo stiskni <b>F1</b>.</li>"
+                    "<li>Dovez Spota (fyzicky) znovu k fiducialu.</li>"
+                    "<li>Spusť playback znovu — power-on proběhne automaticky "
+                    "na Fiducial kroku.</li>"
                     "</ul>"
                 )
                 self._tip_box.setVisible(True)
