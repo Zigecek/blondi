@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -267,6 +268,49 @@ class RecordingService:
         )
         return cp
 
+    def _stop_recording_with_retry(self, *, total_timeout_s: float = 20.0) -> None:
+        """Volá ``stop_recording`` s retry na ``NotReadyYetError``.
+
+        GraphNav po vytvoření waypointu (zejména posledního) krátce zpracovává
+        mapu a odmítá stop recording s NotReadyYetError "Try again in 1-2
+        seconds". Čekáme v krátkých intervalech do celkového timeoutu.
+        """
+        # Lazy import — bosdyn je dostupný jen v runtime s autonomy.
+        try:
+            from bosdyn.client.recording import NotReadyYetError
+        except ImportError:
+            NotReadyYetError = None  # type: ignore[assignment]
+
+        deadline = time.monotonic() + total_timeout_s
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                self._recorder.stop_recording()
+                if attempt > 1:
+                    _log.info("stop_recording succeeded on attempt %d", attempt)
+                return
+            except Exception as exc:
+                is_not_ready = (
+                    NotReadyYetError is not None
+                    and isinstance(exc, NotReadyYetError)
+                ) or "NotReadyYetError" in type(exc).__name__ or (
+                    "NotReadyYet" in str(exc)
+                )
+                if not is_not_ready:
+                    raise
+                if time.monotonic() >= deadline:
+                    _log.warning(
+                        "stop_recording: NotReadyYetError po %d pokusech — vzdávám.",
+                        attempt,
+                    )
+                    raise
+                _log.info(
+                    "stop_recording: NotReadyYetError (attempt %d) — čekám a zkusím znovu",
+                    attempt,
+                )
+                time.sleep(1.0)
+
     def stop_and_export(
         self,
         *,
@@ -305,7 +349,10 @@ class RecordingService:
                     "Auto final waypoint failed (pokračuji s existující mapou): %s",
                     exc,
                 )
-            self._recorder.stop_recording()
+            # Retry na NotReadyYetError — po přidání posledního waypointu
+            # GraphNav potřebuje chvíli na zpracování mapy. Server odpovídá
+            # NotReadyYetError "Try again in 1-2 seconds" — retryujeme až 20 s.
+            self._stop_recording_with_retry(total_timeout_s=20.0)
             self._recorder.download_map(tmp_root)
 
             # KRITICKÉ: Přečti skutečně viděné fiducial IDs z WaypointSnapshot

@@ -269,8 +269,10 @@ class MainWindow(QMainWindow):
         if not self._ensure_bundle():
             return
         try:
+            # parent=None aby wizard byl plnohodnotné top-level okno
+            # s nativními minimize/maximize buttons (problém 9).
             wiz = RecordingWizard(
-                self._config, parent=self, bundle=self._bundle
+                self._config, parent=None, bundle=self._bundle
             )
             wiz.finished.connect(self._on_wizard_closed)
             wiz.showMaximized()
@@ -289,7 +291,7 @@ class MainWindow(QMainWindow):
             wiz = PlaybackWizard(
                 self._config,
                 ocr_worker=self._ocr_worker,
-                parent=self,
+                parent=None,
                 bundle=self._bundle,
             )
             wiz.finished.connect(self._on_wizard_closed)
@@ -306,7 +308,7 @@ class MainWindow(QMainWindow):
         if not self._ensure_bundle():
             return
         try:
-            wiz = WalkWizard(self._config, parent=self, bundle=self._bundle)
+            wiz = WalkWizard(self._config, parent=None, bundle=self._bundle)
             wiz.finished.connect(self._on_wizard_closed)
             wiz.showMaximized()
             self._walk_wizard = wiz
@@ -324,20 +326,31 @@ class MainWindow(QMainWindow):
         neaktivní a menu tlačítka by byly navždy disabled.
         """
         sender = self.sender()
+        closed_wizards = []
         for attr in ("_recording_wizard", "_playback_wizard", "_walk_wizard"):
             wiz = getattr(self, attr, None)
             if wiz is None:
                 continue
             if wiz is sender:
+                closed_wizards.append(wiz)
                 setattr(self, attr, None)
                 continue
             # Pojistka: wizard už není visible (zavřený) nebo C++ objekt je
             # pryč — vynuluj i když není sender.
             try:
                 if not wiz.isVisible():
+                    closed_wizards.append(wiz)
                     setattr(self, attr, None)
             except RuntimeError:  # C++ object already deleted
                 setattr(self, attr, None)
+        # Explicit deleteLater pro zavřené wizardy (bez WA_DeleteOnClose
+        # musí C++ obj uklidit přes Qt event loop, Python GC nestačí kvůli
+        # QObject parent cycle).
+        for wiz in closed_wizards:
+            try:
+                wiz.deleteLater()
+            except RuntimeError:
+                pass
         # Refresh status — pro případ že by wizard nakonec bundle zničil
         # (by shouldn't, ale bezpečnost > performance).
         if self._bundle is not None:
@@ -443,6 +456,22 @@ class MainWindow(QMainWindow):
                     timer.stop()
                 except Exception as exc:
                     _log.warning("Timer %s stop failed: %s", timer_attr, exc)
+
+        # Aktivní wizardy (parent=None → nezavřou se automaticky při
+        # close MainWindow) zavři explicitně. Pokud C++ objekt už je
+        # deleted (race), setattr None stačí.
+        for attr in ("_recording_wizard", "_playback_wizard", "_walk_wizard"):
+            wiz = getattr(self, attr, None)
+            setattr(self, attr, None)
+            if wiz is None:
+                continue
+            try:
+                if wiz.isVisible():
+                    wiz.close()
+            except RuntimeError:
+                pass  # C++ already deleted
+            except Exception as exc:
+                _log.warning("Wizard close failed during cleanup: %s", exc)
 
         if self._bundle is not None:
             try:
