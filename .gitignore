@@ -36,3 +36,5 @@ build/_logs/
 
 # DB dumps
 *.sql.bak
+
+.claude/*local*

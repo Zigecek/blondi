@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Optional
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -132,7 +133,11 @@ class PlaybackRunPage(QWizardPage):
         self._btn_start.setStyleSheet(
             "QPushButton { background:#2e7d32; color:white; font-size:18px;"
             " font-weight:bold; padding:14px; border-radius:6px; }"
+            "QPushButton:disabled { background:#9e9e9e; color:#eeeeee; }"
         )
+        # Disabled od začátku — enable se až po dokončení prepare_map
+        # (upload + lokalizace u fiducialu). Viz problém 8.
+        self._btn_start.setEnabled(False)
         self._btn_start.clicked.connect(self._on_start)
         side_layout.addWidget(self._btn_start)
 
@@ -160,15 +165,11 @@ class PlaybackRunPage(QWizardPage):
         self._btn_stop_return.setVisible(False)
         side_layout.addWidget(self._btn_stop_return)
 
-        self._btn_next = QPushButton("Pokračovat k výsledku ▶")
-        self._btn_next.setEnabled(False)
-        self._btn_next.clicked.connect(self._go_next)
-        side_layout.addWidget(self._btn_next)
-
-        # Prázdný prostor dole → E-STOP floating widget (pravý dolní roh)
-        # se nepřekrývá s "Pokračovat k výsledku". Stejný pattern jako ostatní
-        # stránky s side panelem (teleop_record_page, fiducial_page).
-        side_layout.addStretch(1)
+        # Prostor pro floating E-Stop widget (220×70 v pravém dolním rohu)
+        # aby nepřekrýval STOP tlačítko. Auto-přechod na result page po
+        # dokončení jízdy (problém 1+3) — místo manuálního tlačítka spustíme
+        # QTimer.singleShot v _finish_page_state.
+        side_layout.addSpacing(90)
 
         root.addWidget(side)
 
@@ -209,6 +210,7 @@ class PlaybackRunPage(QWizardPage):
         self._progress.setVisible(True)
         self._progress.setRange(0, 0)
         self._btn_start.setEnabled(False)
+        self._btn_start.setText("Čekám na přípravu mapy...")
         self._status_label.setText("Nahrávám mapu do Spota...")
         worker = FunctionWorker(self._service.prepare_map, int(map_id))
         worker.finished_ok.connect(self._on_prepare_ok)
@@ -256,19 +258,23 @@ class PlaybackRunPage(QWizardPage):
         # 3) Odpoj PlaybackService signály (PR-08 FIND-141). Pokud
         # run_thread ještě pokračuje v pozadí, signály by emit do
         # zničené stránky. Disconnect bez slotu = disconnect všech.
+        # RuntimeWarning se emituje když signál nemá žádný connect — to je
+        # validní stav (drift_detected/avoidance_failed ne vždy propojené).
         if self._service is not None:
-            for sig_name in (
-                "progress", "run_started", "checkpoint_reached",
-                "photo_taken", "run_completed", "run_failed",
-                "drift_detected", "avoidance_failed",
-            ):
-                sig = getattr(self._service, sig_name, None)
-                if sig is None:
-                    continue
-                try:
-                    sig.disconnect()
-                except (TypeError, RuntimeError):
-                    pass
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                for sig_name in (
+                    "progress", "run_started", "checkpoint_reached",
+                    "photo_taken", "run_completed", "run_failed",
+                    "drift_detected", "avoidance_failed",
+                ):
+                    sig = getattr(self._service, sig_name, None)
+                    if sig is None:
+                        continue
+                    try:
+                        sig.disconnect()
+                    except (TypeError, RuntimeError):
+                        pass
 
         # 4) Odpoj OCR signály aby po zavření stránky neběžely queued call-y.
         if self._ocr_worker is not None and self._ocr_signals_connected:
@@ -322,6 +328,7 @@ class PlaybackRunPage(QWizardPage):
         self._meta = meta
         self._progress.setVisible(False)
         self._btn_start.setEnabled(True)
+        self._btn_start.setText("▶ START")
         self._status_label.setText("Mapa nahraná a lokalizováno. Klikni START.")
         self.wizard().playback_state().lifecycle = WIZARD_LIFECYCLE_READY  # type: ignore[attr-defined]
 
@@ -340,7 +347,6 @@ class PlaybackRunPage(QWizardPage):
         self._progress.setVisible(True)
         self._progress.setRange(0, self._meta.checkpoints_count or 0)
         self._progress.setValue(0)
-        self._btn_next.setEnabled(False)
         self.wizard().playback_state().lifecycle = WIZARD_LIFECYCLE_RUNNING  # type: ignore[attr-defined]
 
         operator = self._config.operator_label or None
@@ -401,14 +407,21 @@ class PlaybackRunPage(QWizardPage):
         state.lifecycle = WIZARD_LIFECYCLE_FAILED
         self._status_label.setText(f"⚠ Jízda skončila s chybou: {reason}")
         self._btn_stop_return.setVisible(False)
-        # PR-08 FIND-142: Next button vždy enabled po dokončení; ResultPage
-        # si poradí i bez run_id (ukáže "Žádná jízda neproběhla").
-        self._btn_next.setEnabled(True)
         self._run_finished = True
         self.completeChanged.emit()
+        # Delší prodleva u chyby, aby si operátor stihl přečíst důvod.
+        QTimer.singleShot(1500, self._auto_advance)
 
-    def _go_next(self) -> None:
-        self.wizard().next()
+    def _auto_advance(self) -> None:
+        """Přechod na result page po doběhnutí (problém 1+3).
+
+        Ochrana proti double-fire / page change race: zkontroluj, že jsme
+        pořád currentPage před voláním next().
+        """
+        wizard = self.wizard()
+        if wizard is None or wizard.currentPage() is not self:
+            return
+        wizard.next()
 
     def _append_log(self, text: str) -> None:
         self._log_list.addItem(text)
@@ -581,9 +594,11 @@ class PlaybackRunPage(QWizardPage):
                 f"⚠ Jízda skončila stavem: {status.value}"
             )
         self._run_finished = True
-        self._btn_next.setEnabled(self._run_id is not None)
         self._btn_stop_return.setVisible(False)
         self.completeChanged.emit()
+        # Auto-přechod na result page s krátkou prodlevou, aby operátor
+        # zahlédl status text (problém 1+3).
+        QTimer.singleShot(800, self._auto_advance)
 
 
 __all__ = ["PlaybackRunPage"]

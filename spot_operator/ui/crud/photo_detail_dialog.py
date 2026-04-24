@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QKeyEvent, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -52,11 +52,20 @@ class PhotoDetailDialog(QDialog):
         self,
         config: AppConfig,
         photo_id: int,
+        *,
+        photo_ids: list[int] | None = None,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
         self._config = config
         self._photo_id = photo_id
+        # Navigace šipkami (problém 6) — list IDs v aktuálním pořadí tabulky.
+        self._photo_ids: list[int] = list(photo_ids) if photo_ids else [photo_id]
+        try:
+            self._current_index = self._photo_ids.index(photo_id)
+        except ValueError:
+            self._photo_ids = [photo_id]
+            self._current_index = 0
         self._workers: list = []
         self._reocr_worker: FunctionWorker | None = None
         self.setWindowTitle(f"Foto #{photo_id}")
@@ -80,6 +89,22 @@ class PhotoDetailDialog(QDialog):
         root.addWidget(self._detail_text)
 
         action_row = QHBoxLayout()
+
+        # Navigace šipkami mezi fotkami (problém 6).
+        self._btn_prev = QPushButton("◀ Předchozí")
+        self._btn_prev.setToolTip("Předchozí fotka (←, PageUp)")
+        self._btn_prev.clicked.connect(self._go_prev)
+        action_row.addWidget(self._btn_prev)
+
+        self._btn_next = QPushButton("Další ▶")
+        self._btn_next.setToolTip("Další fotka (→, PageDown)")
+        self._btn_next.clicked.connect(self._go_next)
+        action_row.addWidget(self._btn_next)
+
+        self._nav_label = QLabel("")
+        self._nav_label.setStyleSheet("color:#666; padding: 0 8px;")
+        action_row.addWidget(self._nav_label)
+
         self._btn_reocr_fast_plate = QPushButton("Re-OCR: fast-plate (hlavní)")
         self._btn_reocr_fast_plate.setToolTip(
             "Spustí hlavní OCR pipeline (YOLO + fast-plate-ocr) nad touto fotkou."
@@ -100,17 +125,34 @@ class PhotoDetailDialog(QDialog):
         action_row.addWidget(buttons)
         root.addLayout(action_row)
 
+        # Non-modální status pro re-OCR výsledek — nahrazuje dřívější info_dialog,
+        # který blokoval UI a komplikoval cleanup při rychlém zavření (problém 7).
+        self._reocr_status = QLabel("")
+        self._reocr_status.setTextFormat(Qt.RichText)
+        self._reocr_status.setWordWrap(True)
+        self._reocr_status.setVisible(False)
+        root.addWidget(self._reocr_status)
+
+        self._update_nav_ui()
         self._start_load()
 
     # ---- Lifecycle ----
 
     def closeEvent(self, event) -> None:  # noqa: ANN001
+        # PR-12 (problém 7): re-OCR worker nejdřív explicit disconnect signálů,
+        # pak stop_and_wait. Subprocess Nomeroff může běžet ~30 s — bez disconnectu
+        # by finished_ok emitoval do právě zavíraného widgetu a crashnul.
+        if self._reocr_worker is not None:
+            try:
+                self._reocr_worker.finished_ok.disconnect()
+                self._reocr_worker.failed.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+            self._reocr_worker.stop_and_wait()
+            self._reocr_worker = None
         for w in list(self._workers):
             w.stop_and_wait()
         self._workers.clear()
-        if self._reocr_worker is not None:
-            self._reocr_worker.stop_and_wait()
-            self._reocr_worker = None
         super().closeEvent(event)
 
     # ---- Async load ----
@@ -241,6 +283,10 @@ class PhotoDetailDialog(QDialog):
         if self._reocr_worker is not None and self._reocr_worker.isRunning():
             return
         self._set_reocr_buttons_enabled(False)
+        self._reocr_status.setText(
+            "<i>Spouštím Nomeroff subprocess (může trvat až 30 s)…</i>"
+        )
+        self._reocr_status.setVisible(True)
         photo_id = self._photo_id
         yolo_path = self._config.ocr_yolo_model_path
 
@@ -259,6 +305,10 @@ class PhotoDetailDialog(QDialog):
         if self._reocr_worker is not None and self._reocr_worker.isRunning():
             return
         self._set_reocr_buttons_enabled(False)
+        self._reocr_status.setText(
+            "<i>Spouštím fast-plate pipeline (YOLO + OCR)…</i>"
+        )
+        self._reocr_status.setVisible(True)
         photo_id = self._photo_id
         config = self._config
 
@@ -273,10 +323,6 @@ class PhotoDetailDialog(QDialog):
         self._reocr_worker = worker
         worker.start()
 
-    def _set_reocr_buttons_enabled(self, enabled: bool) -> None:
-        self._btn_reocr_fast_plate.setEnabled(enabled)
-        self._btn_reocr_nomeroff.setEnabled(enabled)
-
     def _on_reocr_done(self, detections, engine_name: str) -> None:  # noqa: ANN001
         self._reocr_worker = None
         if not self.isVisible():
@@ -288,23 +334,100 @@ class PhotoDetailDialog(QDialog):
                     rows = [d.to_db_row(self._photo_id) for d in detections]
                     detections_repo.insert_many(s, rows)
                 s.commit()
-            info_dialog(
-                self,
-                "Re-OCR hotové",
-                f"Engine: {engine_name}\nDetekcí: {len(detections)}",
+            # Non-modální status místo info_dialog — blokující dialog dřív komplikoval
+            # cleanup při rychlém zavření hlavního dialogu (problém 7 crash).
+            self._reocr_status.setText(
+                f"<span style='color:#2e7d32;'>✓ Re-OCR hotové — engine "
+                f"<b>{engine_name}</b>, detekcí: <b>{len(detections)}</b></span>"
             )
+            self._reocr_status.setVisible(True)
         except Exception as exc:
-            error_dialog(self, "Chyba", str(exc))
+            _log.warning("Re-OCR DB write failed: %s", exc)
+            self._reocr_status.setText(
+                f"<span style='color:#c0392b;'>✗ Chyba zápisu do DB: {exc}</span>"
+            )
+            self._reocr_status.setVisible(True)
         self._set_reocr_buttons_enabled(True)
-        # Přenačti metadata (detekce se změnily) — nikoli obrázek.
-        self._load_metadata()
+        # Přenačti metadata (detekce se změnily) — nikoli obrázek. Pojistka:
+        # pokud dialog mezitím přestal být visible, nezačíná další worker.
+        if self.isVisible():
+            self._load_metadata()
 
     def _on_reocr_failed(self, reason: str) -> None:
         self._reocr_worker = None
         if not self.isVisible():
             return
         self._set_reocr_buttons_enabled(True)
-        error_dialog(self, "Re-OCR selhalo", reason)
+        # Non-modální status místo error_dialog (problém 7).
+        self._reocr_status.setText(
+            f"<span style='color:#c0392b;'>✗ Re-OCR selhalo: {reason}</span>"
+        )
+        self._reocr_status.setVisible(True)
+
+    # ---- Navigace šipkami (problém 6) ----
+
+    def _go_prev(self) -> None:
+        if self._current_index > 0:
+            self._current_index -= 1
+            self._switch_photo(self._photo_ids[self._current_index])
+
+    def _go_next(self) -> None:
+        if self._current_index < len(self._photo_ids) - 1:
+            self._current_index += 1
+            self._switch_photo(self._photo_ids[self._current_index])
+
+    def _switch_photo(self, photo_id: int) -> None:
+        """Přepne dialog na jinou fotku — zastaví staré workery, vyčistí UI,
+        načte nová data. Re-OCR běh blokuje přepnutí (viz _update_nav_ui)."""
+        self._photo_id = photo_id
+        self.setWindowTitle(f"Foto #{photo_id}")
+        self._preview.setText("<i>Načítám fotku…</i>")
+        self._preview.setPixmap(QPixmap())  # vyprázdní staré zobrazení
+        self._detail_text.setText("<i>Načítám metadata…</i>")
+        self._reocr_status.setVisible(False)
+        if hasattr(self, "_original_pixmap"):
+            del self._original_pixmap
+        # Stop staré workery (metadata + bytes z předchozí fotky).
+        for w in list(self._workers):
+            try:
+                w.stop_and_wait()
+            except Exception:
+                pass
+        self._workers.clear()
+        self._update_nav_ui()
+        self._start_load()
+
+    def _update_nav_ui(self) -> None:
+        total = len(self._photo_ids)
+        at_first = self._current_index <= 0
+        at_last = self._current_index >= total - 1
+        # Během re-OCR zamknout navigaci, aby přepnutí fotky nezpůsobilo
+        # race s worker callbackem (_on_reocr_done pak zapisuje do jiné fotky).
+        reocr_running = (
+            self._reocr_worker is not None and self._reocr_worker.isRunning()
+        )
+        self._btn_prev.setEnabled(not at_first and not reocr_running)
+        self._btn_next.setEnabled(not at_last and not reocr_running)
+        if total > 1:
+            self._nav_label.setText(f"{self._current_index + 1} / {total}")
+        else:
+            self._nav_label.setText("")
+
+    def _set_reocr_buttons_enabled(self, enabled: bool) -> None:  # noqa: F811
+        # Override — zohledni i navigační tlačítka během re-OCR.
+        self._btn_reocr_fast_plate.setEnabled(enabled)
+        self._btn_reocr_nomeroff.setEnabled(enabled)
+        self._update_nav_ui()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: D401
+        key = event.key()
+        if key in (Qt.Key_Left, Qt.Key_PageUp):
+            self._go_prev()
+            return
+        if key in (Qt.Key_Right, Qt.Key_PageDown):
+            self._go_next()
+            return
+        super().keyPressEvent(event)
 
 
 # ---- Helpery ----

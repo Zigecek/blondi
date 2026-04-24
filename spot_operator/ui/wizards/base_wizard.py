@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QEvent
 from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import QWidget, QWizard
 
@@ -49,6 +49,16 @@ class SpotWizard(QWizard):
         self.setOption(QWizard.NoCancelButton, False)
         self.setOption(QWizard.HaveHelpButton, False)
         self.setMinimumSize(UI_WIZARD_MIN_WIDTH, UI_WIZARD_MIN_HEIGHT)
+        # Explicitně povol minimize/maximize v titlebaru. QWizard default
+        # je neumožňuje, takže minimalizovaný wizard na liště ztrácí
+        # fullscreen a nejde ho znovu maximalizovat (problém 9).
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowMaximizeButtonHint
+        )
+        # Sledujeme maximized state pro auto-obnovu z taskbaru.
+        self._was_maximized: bool = False
 
         self._f1_shortcut = QShortcut(QKeySequence("F1"), self)
         # PR-09 FIND-137: WindowShortcut místo ApplicationShortcut, aby F1
@@ -185,6 +195,31 @@ class SpotWizard(QWizard):
                 )
                 self._bundle = None
         return ok
+
+    def changeEvent(self, event) -> None:  # noqa: D401, ANN001 — Qt event
+        """Zachovat maximized state při návratu z taskbaru (problém 9).
+
+        Windows 11 při minimalizaci QWizardu (bez explicit Qt.WindowMaximize
+        flag) ztrácí fullscreen po obnovení. Sledujeme přechody:
+        - maximized → minimized: zapamatuj _was_maximized
+        - minimized → restored: pokud _was_maximized, znovu showMaximized().
+        """
+        if event.type() == QEvent.WindowStateChange:
+            old_state = event.oldState()
+            new_state = self.windowState()
+            was_max = bool(old_state & Qt.WindowMaximized)
+            is_min = bool(new_state & Qt.WindowMinimized)
+            was_min = bool(old_state & Qt.WindowMinimized)
+            if was_max and is_min:
+                self._was_maximized = True
+            elif was_min and not is_min and self._was_maximized:
+                self._was_maximized = False
+                # showMaximized() musí proběhnout po změně stavu, jinak Qt
+                # dvojí změnou stavu propašuje normal window.
+                from PySide6.QtCore import QTimer
+
+                QTimer.singleShot(0, self.showMaximized)
+        super().changeEvent(event)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: D401
         if self._should_confirm_close():

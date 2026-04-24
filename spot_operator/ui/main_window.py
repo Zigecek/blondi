@@ -316,14 +316,28 @@ class MainWindow(QMainWindow):
             error_dialog(self, "Chyba", str(exc))
 
     def _on_wizard_closed(self, _result: int) -> None:
-        """Po zavření wizardu vynuluj referenci. Bundle zůstává v MainWindow."""
+        """Po zavření wizardu vynuluj referenci. Bundle zůstává v MainWindow.
+
+        Defensive scan (problém 10+11): pokud signál finished dorazí ze
+        senderu kterého neznáme (race / destructor), stále chceme vynulovat
+        všechny již neviditelné wizardy. Bez toho by reference zůstala
+        neaktivní a menu tlačítka by byly navždy disabled.
+        """
         sender = self.sender()
-        if sender is self._recording_wizard:
-            self._recording_wizard = None
-        elif sender is self._playback_wizard:
-            self._playback_wizard = None
-        elif sender is self._walk_wizard:
-            self._walk_wizard = None
+        for attr in ("_recording_wizard", "_playback_wizard", "_walk_wizard"):
+            wiz = getattr(self, attr, None)
+            if wiz is None:
+                continue
+            if wiz is sender:
+                setattr(self, attr, None)
+                continue
+            # Pojistka: wizard už není visible (zavřený) nebo C++ objekt je
+            # pryč — vynuluj i když není sender.
+            try:
+                if not wiz.isVisible():
+                    setattr(self, attr, None)
+            except RuntimeError:  # C++ object already deleted
+                setattr(self, attr, None)
         # Refresh status — pro případ že by wizard nakonec bundle zničil
         # (by shouldn't, ale bezpečnost > performance).
         if self._bundle is not None:

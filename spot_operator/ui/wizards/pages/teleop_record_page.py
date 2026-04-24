@@ -39,6 +39,7 @@ from spot_operator.services.recording_service import RecordingService
 from spot_operator.ui.common.dialogs import confirm_dialog, error_dialog, info_dialog
 from spot_operator.ui.common.estop_floating import EstopFloating
 from spot_operator.ui.common.photo_confirm_overlay import PhotoConfirmOverlay
+from spot_operator.ui.common.workers import FunctionWorker, cleanup_worker
 
 _log = get_logger(__name__)
 
@@ -138,6 +139,18 @@ class TeleopRecordPage(QWizardPage):
         self._btn_waypoint.clicked.connect(self._add_waypoint)
         side_layout.addWidget(self._btn_waypoint)
 
+        # Fiducial re-check během nahrávání (problém 4b) — operátor si může
+        # u posledního checkpointu ověřit, že kamera stále vidí startovací
+        # fiducial. Neinterferuje s recordingem (read-only fiducial scan).
+        self._btn_check_fiducial = QPushButton("🎯 Zkontrolovat fiducial")
+        self._btn_check_fiducial.setToolTip(
+            "Zkontroluje, zda Spot vidí startovací fiducial. "
+            "Nepřerušuje nahrávání."
+        )
+        self._btn_check_fiducial.clicked.connect(self._check_fiducial)
+        side_layout.addWidget(self._btn_check_fiducial)
+        self._fiducial_check_worker: Optional[FunctionWorker] = None
+
         self._start_hint = QLabel(
             "<b>1) Stiskni 'Waypoint' (C) u startu (fiducial)</b><br>"
             "<span style='color:#666;'>Foto tlačítka se odemknou po prvním "
@@ -182,6 +195,10 @@ class TeleopRecordPage(QWizardPage):
         )
         self._btn_finish.clicked.connect(self._on_finish_clicked)
         side_layout.addWidget(self._btn_finish)
+
+        # Prostor pro floating E-Stop widget (220×70 v pravém dolním rohu).
+        # Bez toho překrývá "Dokončit nahrávání". Výška 70 + margin 2×10 = 90.
+        side_layout.addSpacing(90)
 
         root.addWidget(side)
 
@@ -327,6 +344,10 @@ class TeleopRecordPage(QWizardPage):
         # 4b) Uvolni cached ImagePoller (PR-08 FIND-148).
         if hasattr(self, "_poller"):
             self._poller = None
+
+        # 4c) Fiducial check worker (problém 4b).
+        cleanup_worker(self._fiducial_check_worker)
+        self._fiducial_check_worker = None
 
         # 5) Pokud recording stále běží (např. nečekané zavření), abortuj bez uložení.
         if self._service is not None and self._service.is_recording:
@@ -621,6 +642,60 @@ class TeleopRecordPage(QWizardPage):
             f"Waypointů: {self._service.waypoint_count} · Fotek: {self._service.photo_count}"
         )
 
+    # ---- Fiducial re-check (problém 4b) ----
+
+    def _check_fiducial(self) -> None:
+        """Spustí asynchronní fiducial scan. Nahrávání pokračuje."""
+        if self._fiducial_check_worker is not None and self._fiducial_check_worker.isRunning():
+            return
+        wizard = self.wizard()
+        bundle = wizard.bundle() if wizard is not None else None  # type: ignore[attr-defined]
+        if bundle is None:
+            return
+        state = wizard.recording_state()  # type: ignore[attr-defined]
+        required_id = state.fiducial_id
+        config = wizard.config  # type: ignore[attr-defined]
+
+        from app.robot.fiducial_check import visible_fiducials
+
+        self._btn_check_fiducial.setEnabled(False)
+        self._btn_check_fiducial.setText("🎯 Hledám fiducial…")
+        worker = FunctionWorker(
+            visible_fiducials,
+            bundle.session,
+            required_id=int(required_id) if required_id is not None else None,
+            max_distance_m=config.fiducial_distance_threshold_m,
+            parent=self,
+        )
+        worker.finished_ok.connect(self._on_fiducial_ok)
+        worker.failed.connect(self._on_fiducial_fail)
+        worker.finished.connect(worker.deleteLater)
+        self._fiducial_check_worker = worker
+        worker.start()
+
+    def _on_fiducial_ok(self, observations) -> None:  # noqa: ANN001
+        self._btn_check_fiducial.setEnabled(True)
+        self._btn_check_fiducial.setText("🎯 Zkontrolovat fiducial")
+        if observations:
+            ids = ", ".join(str(getattr(o, "tag_id", "?")) for o in observations)
+            info_dialog(
+                self,
+                "Fiducial vidím",
+                f"✓ Spot aktuálně vidí fiducial(y): {ids}",
+            )
+        else:
+            info_dialog(
+                self,
+                "Fiducial nevidím",
+                "✗ Spot aktuálně nevidí žádný fiducial. "
+                "Přesuň Spota nebo upravené natočení kamery.",
+            )
+
+    def _on_fiducial_fail(self, reason: str) -> None:
+        self._btn_check_fiducial.setEnabled(True)
+        self._btn_check_fiducial.setText("🎯 Zkontrolovat fiducial")
+        error_dialog(self, "Kontrola fiducialu selhala", reason)
+
     # ---- Finish ----
 
     def _on_finish_clicked(self) -> None:
@@ -644,6 +719,17 @@ class TeleopRecordPage(QWizardPage):
                 destructive=True,
             ):
                 return
+        # Finální potvrzení (problém 4a) — po přepnutí na SaveMapPage se ihned
+        # spustí stop_and_export (stahování mapy ze Spota), poté už nelze
+        # přidat další waypointy/fotky.
+        if not confirm_dialog(
+            self,
+            "Ukončit nahrávání?",
+            "Mapa se stáhne ze Spota do PC. Po potvrzení už nelze přidávat "
+            "další waypointy ani fotit — vrátit se zpět nejde.",
+            destructive=True,
+        ):
+            return
         self._send_velocity(0, 0, 0)
         # PR-09 FIND-150: odstraněn dead recording_finished signál — wizard
         # pokračuje přes next() + QWizardPage.isComplete lifecycle.

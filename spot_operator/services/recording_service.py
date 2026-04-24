@@ -291,6 +291,20 @@ class RecordingService:
         tmp_root = Path(tempfile.mkdtemp(prefix="rec_", dir=str(TEMP_ROOT)))
         ok = False
         try:
+            # Safety: automatický závěrečný waypoint na aktuální pozici (problém 4c).
+            # autonomy `stop_recording()` sám žádný implicit end-waypoint nepřidává.
+            # Pokud operátor zapomněl stisknout C u konečného fiducialu, playback by
+            # skončil na posledním manuálním waypointu (uprostřed trasy). Jeden
+            # waypoint navíc neškodí — obsahuje čistou end pose s fiducial
+            # observations, což zlepšuje finální lokalizaci.
+            try:
+                final_cp = self.add_unnamed_waypoint()
+                _log.info("Auto-added final waypoint before stop: %s", final_cp.name)
+            except Exception as exc:
+                _log.warning(
+                    "Auto final waypoint failed (pokračuji s existující mapou): %s",
+                    exc,
+                )
             self._recorder.stop_recording()
             self._recorder.download_map(tmp_root)
 

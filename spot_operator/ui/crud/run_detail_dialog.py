@@ -152,16 +152,39 @@ class RunDetailDialog(QDialog):
             return
         from spot_operator.ui.crud.photo_detail_dialog import PhotoDetailDialog
 
-        dlg = PhotoDetailDialog(self._config, row.id, parent=self)
+        # IDs aktuálně načtených fotek pro navigaci šipkami (problém 6).
+        photo_ids = [
+            self._model.row_at(i).id
+            for i in range(self._model.rowCount())
+            if self._model.row_at(i) is not None
+        ]
+        dlg = PhotoDetailDialog(
+            self._config, row.id, photo_ids=photo_ids, parent=self,
+        )
         self._current_dlg = dlg
         dlg.finished.connect(lambda _code: self._on_photo_dlg_finished(dlg))
         dlg.show()
 
     def _on_photo_dlg_finished(self, dlg) -> None:  # noqa: ANN001
+        last_photo_id = getattr(dlg, "_photo_id", None)
         if self._current_dlg is dlg:
             self._current_dlg = None
         dlg.deleteLater()
-        # Po případném re-OCR obnov seznam (detekce se mohly změnit).
+        # Po případném re-OCR obnov seznam + obnov selection na poslední fotku (problém 5).
+        if last_photo_id is None:
+            self._model.reset()
+            return
+
+        def _restore_once(*_args) -> None:
+            self._model.modelReset.disconnect(_restore_once)
+            for row in range(self._model.rowCount()):
+                dto = self._model.row_at(row)
+                if dto is not None and dto.id == last_photo_id:
+                    self._view.selectRow(row)
+                    self._view.setFocus()
+                    return
+
+        self._model.modelReset.connect(_restore_once)
         self._model.reset()
 
 

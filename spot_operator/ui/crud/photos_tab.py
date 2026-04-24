@@ -118,18 +118,58 @@ class PhotosTab(QWidget):
         row = self._model.row_at(index.row())
         if row is None:
             return
-        dlg = PhotoDetailDialog(self._config, row.id, parent=self)
+        # Seznam IDs aktuálně načtených řádků pro navigaci šipkami (problém 6).
+        photo_ids = [
+            self._model.row_at(i).id
+            for i in range(self._model.rowCount())
+            if self._model.row_at(i) is not None
+        ]
+        dlg = PhotoDetailDialog(
+            self._config, row.id, photo_ids=photo_ids, parent=self,
+        )
         self._current_dlg = dlg
         dlg.finished.connect(lambda _code: self._on_dlg_finished(dlg))
         dlg.show()
 
     def _on_dlg_finished(self, dlg) -> None:  # noqa: ANN001
-        # Dialog skončil — uvolni referenci a refresh tabulku
-        # (detekce mohly být změněny re-OCR).
+        # Dialog skončil — uvolni referenci a refresh tabulku se zachovaným
+        # focusem na poslední prohlíženou fotku (problém 5).
+        last_photo_id = getattr(dlg, "_photo_id", None)
         if self._current_dlg is dlg:
             self._current_dlg = None
         dlg.deleteLater()
+        self._reload_preserving_selection(last_photo_id)
+
+    def _reload_preserving_selection(self, photo_id: int | None) -> None:
+        """Reload tabulky + po obnovení přeskoč na řádek s daným photo_id.
+
+        PagedTableModel.reset() volá beginResetModel() který Qt cleanu
+        selection. Po _on_initial (modelReset signál) najdeme řádek a
+        nastavíme focus zpět (problém 5).
+        """
+        if photo_id is None:
+            self._reload()
+            return
+
+        # Jednorázový connect přes partial — odpojí se po prvním vyvolání.
+        def _restore_once(*_args) -> None:
+            self._model.modelReset.disconnect(_restore_once)
+            self._restore_selection(photo_id)
+
+        self._model.modelReset.connect(_restore_once)
         self._reload()
+
+    def _restore_selection(self, photo_id: int) -> None:
+        for row in range(self._model.rowCount()):
+            dto = self._model.row_at(row)
+            if dto is not None and dto.id == photo_id:
+                self._view.selectRow(row)
+                self._view.setFocus()
+                return
+        # Fotka už není na první stránce (sort změnil / deleted); fallback první řádek.
+        if self._model.rowCount() > 0:
+            self._view.selectRow(0)
+            self._view.setFocus()
 
     # ---- Bulk reset ----
 
