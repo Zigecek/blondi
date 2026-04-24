@@ -108,7 +108,6 @@ def _install_qt_handler() -> None:
             qt_logger.info(message)
 
     qInstallMessageHandler(handler)
-    global _qt_handler_installed
     _qt_handler_installed = True
 
 
