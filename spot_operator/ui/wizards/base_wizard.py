@@ -220,7 +220,11 @@ class SpotWizard(QWizard):
             ):
                 event.ignore()
                 return
-        event.accept()
+        # KRITICKÉ: event.accept() samotný neemituje QDialog.finished signál —
+        # MainWindow by pak nevěděl že wizard se zavřel a menu by zůstalo
+        # disabled. QDialog.closeEvent default volá reject() který emituje
+        # finished(QDialog.Rejected) + hide, takže deleguj na super().
+        super().closeEvent(event)
 
     def _should_confirm_close(self) -> bool:
         """Override v subclassech — True pokud probíhá kritická fáze.
