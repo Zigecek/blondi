@@ -72,7 +72,7 @@ Musí vypsat `Python 3.10.x`.
 ## 5. Jak vytvořit a aktivovat venv
 
 ```bat
-cd c:\Users\zige\spot
+cd c:\Users\user\spot
 setup_venv.bat
 ```
 
@@ -112,7 +112,7 @@ Další spuštění stačí vybrat profil z dropdownu.
 ## 8. Jak spustit aplikaci
 
 ```bat
-cd c:\Users\zige\spot
+cd c:\Users\user\spot
 launch.bat
 ```
 
@@ -286,7 +286,7 @@ Vypíše verze klíčových balíčků a cesty — užitečné při hlášení c
 ## Struktura projektu
 
 ```
-c:\Users\zige\spot\
+c:\Users\user\spot\
 ├── main.py                      # entry point
 ├── launch.bat / setup_venv.bat / run_app.bat
 ├── requirements.txt
