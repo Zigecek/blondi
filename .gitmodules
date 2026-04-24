@@ -1,0 +1,3 @@
+[submodule "autonomy"]
+	path = autonomy
+	url = git@github.com:Zigecek/spot-controller.git
