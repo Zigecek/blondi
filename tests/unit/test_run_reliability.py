@@ -4,8 +4,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from spot_operator.robot.session_factory import SpotBundle
-from spot_operator.db.repositories import runs_repo
+from blondi.robot.session_factory import SpotBundle
+from blondi.db.repositories import runs_repo
 
 
 class _ScalarResult:

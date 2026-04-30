@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from spot_operator.services.contracts import (
+from blondi.services.contracts import (
     MapCheckpoint,
     MapPlan,
     _as_optional_int,

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from spot_operator.services.contracts import (
+from blondi.services.contracts import (
     CAPTURE_STATUS_FAILED,
     CAPTURE_STATUS_OK,
     CheckpointResult,

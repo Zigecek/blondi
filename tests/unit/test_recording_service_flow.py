@@ -12,7 +12,7 @@ import pytest
 
 def _make_service() -> "object":
     """Vytvoří RecordingService s mock bundle/recorder."""
-    from spot_operator.services.recording_service import RecordingService
+    from blondi.services.recording_service import RecordingService
 
     bundle = MagicMock()
     recorder = MagicMock()
@@ -40,7 +40,7 @@ def _make_service() -> "object":
     recorder.create_waypoint.side_effect = _create_waypoint
 
     with patch(
-        "spot_operator.services.recording_service.RecordingService.__init__",
+        "blondi.services.recording_service.RecordingService.__init__",
         return_value=None,
     ):
         svc = RecordingService.__new__(RecordingService)
@@ -82,10 +82,10 @@ def test_start_waypoint_set_by_first_checkpoint_if_no_waypoint() -> None:
     )
     # Simuluj capture přes mock
     with patch(
-        "spot_operator.robot.dual_side_capture.capture_sources",
+        "blondi.robot.dual_side_capture.capture_sources",
         return_value={"left": b"bgr_data"},
     ), patch(
-        "spot_operator.services.photo_sink.encode_bgr_to_jpeg",
+        "blondi.services.photo_sink.encode_bgr_to_jpeg",
         return_value=(b"jpeg_bytes", 640, 480),
     ):
         cp = svc.capture_and_record_checkpoint(
@@ -96,7 +96,7 @@ def test_start_waypoint_set_by_first_checkpoint_if_no_waypoint() -> None:
 
 
 def test_capture_failure_raises_CaptureFailedError() -> None:
-    from spot_operator.services.contracts import CaptureFailedError
+    from blondi.services.contracts import CaptureFailedError
 
     svc = _make_service()
     svc._recorder.is_recording = False
@@ -106,7 +106,7 @@ def test_capture_failure_raises_CaptureFailedError() -> None:
         fiducial_id=None,
     )
     with patch(
-        "spot_operator.robot.dual_side_capture.capture_sources",
+        "blondi.robot.dual_side_capture.capture_sources",
         return_value={},  # žádné frame
     ):
         with pytest.raises(CaptureFailedError) as excinfo:

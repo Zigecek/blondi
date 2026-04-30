@@ -33,7 +33,7 @@ excludes = [
     "matplotlib",
     "pytest",
     # root projekt + ocr — autonomy je self-contained, nepotrebuje je
-    "spot_operator",
+    "blondi",
     "ultralytics",
     "torch",
     "nomeroff_net",

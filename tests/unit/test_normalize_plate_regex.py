@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from spot_operator.ocr.reader import _normalize_plate
+from blondi.ocr.reader import _normalize_plate
 
 
 def test_normalize_strips_non_alnum() -> None:

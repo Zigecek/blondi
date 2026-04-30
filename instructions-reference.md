@@ -10,7 +10,7 @@ applies_to:
 document_role: reference
 ---
 
-# Spot Operator — Implementační reference
+# Blondi — Implementační reference
 
 Tento dokument je **implementační reference** pro AI agenty a vývojáře.
 Normativní pravidla (co se smí/nesmí) najdeš v [`instructions.md`](instructions.md).
@@ -58,7 +58,7 @@ c:\Users\zige\spot\
 │   └── versions/
 │       └── *_0001_initial.py
 │
-├── spot_operator/                  # hlavní balíček (unique název, NIKDY `app`)
+├── blondi/                  # hlavní balíček (unique název, NIKDY `app`)
 │   ├── __init__.py                 # __version__
 │   ├── bootstrap.py                # sys.path injekce autonomy/ + ocr/
 │   ├── config.py                   # AppConfig.load_from_env()
@@ -398,7 +398,7 @@ from app.robot.waypoint_namer import WaypointNameGenerator
 
 ### OCR projekt (subprocess only)
 
-`ocr/ocrtest.py::CzechPlateRecognizer` není přímo importovatelný; voláme ho **jen ze subprocessu** (viz `spot_operator/ocr/fallback.py`). API:
+`ocr/ocrtest.py::CzechPlateRecognizer` není přímo importovatelný; voláme ho **jen ze subprocessu** (viz `blondi/ocr/fallback.py`). API:
 
 ```python
 # Subprocess volání:
@@ -881,7 +881,7 @@ def downgrade() -> None:
 Postupuj po vrstvách. Po každé vrstvě ověř (`python -c "import ..."`, `pytest tests/unit/`).
 
 1. **Layout** — adresáře, `launch.bat`, `setup_venv.bat`, `run_app.bat`, `.env.example`, `.gitignore`, `requirements.txt`. Ověř `setup_venv.bat` projde.
-2. **Bootstrap** — `spot_operator/__init__.py`, `bootstrap.py`, `constants.py`, `config.py`, `logging_config.py`.
+2. **Bootstrap** — `blondi/__init__.py`, `bootstrap.py`, `constants.py`, `config.py`, `logging_config.py`.
 3. **DB vrstva** — `enums.py`, `models.py`, `engine.py`, `migrations.py`, `alembic.ini`, `alembic/env.py`, `alembic/versions/0001_initial.py`, všechny repositories. Ověř migraci na čistou DB.
 4. **Map archiver + storage** — `map_archiver.py`, `map_storage.py`. Pytest `test_map_archiver.py`.
 5. **OCR pipeline** — `dtos.py`, `detector.py`, `reader.py`, `pipeline.py`, `fallback.py`. Test normalizace.

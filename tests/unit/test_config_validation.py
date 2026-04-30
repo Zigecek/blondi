@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from spot_operator.config import _require_float
+from blondi.config import _require_float
 
 
 def test_require_float_default() -> None:

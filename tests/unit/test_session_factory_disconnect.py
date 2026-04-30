@@ -13,7 +13,7 @@ def test_disconnect_timeout_does_not_hang() -> None:
     se po nich — celkem max ~12 s. Nastavíme test lease.release na 30 s
     a ověříme, že disconnect skončí <15 s.
     """
-    from spot_operator.robot.session_factory import SpotBundle
+    from blondi.robot.session_factory import SpotBundle
 
     def _hang() -> None:
         time.sleep(30)
@@ -31,7 +31,7 @@ def test_disconnect_timeout_does_not_hang() -> None:
 
 
 def test_bundle_get_info_returns_dataclass() -> None:
-    from spot_operator.robot.session_factory import BundleInfo, SpotBundle
+    from blondi.robot.session_factory import BundleInfo, SpotBundle
 
     session = MagicMock()
     session.hostname = "1.2.3.4"

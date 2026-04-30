@@ -22,7 +22,7 @@ def test_estop_requires_on_release_callback() -> None:
     _qapp()
     from PySide6.QtWidgets import QWidget
 
-    from spot_operator.ui.common.estop_floating import EstopFloating
+    from blondi.ui.common.estop_floating import EstopFloating
 
     parent = QWidget()
     with pytest.raises(TypeError, match="on_release"):
@@ -33,7 +33,7 @@ def test_estop_requires_on_trigger_callback() -> None:
     _qapp()
     from PySide6.QtWidgets import QWidget
 
-    from spot_operator.ui.common.estop_floating import EstopFloating
+    from blondi.ui.common.estop_floating import EstopFloating
 
     parent = QWidget()
     with pytest.raises(TypeError, match="on_trigger"):
@@ -44,7 +44,7 @@ def test_estop_trigger_release_cycle() -> None:
     _qapp()
     from PySide6.QtWidgets import QWidget
 
-    from spot_operator.ui.common.estop_floating import EstopFloating
+    from blondi.ui.common.estop_floating import EstopFloating
 
     trigger_called = []
     release_called = []
@@ -70,7 +70,7 @@ def test_estop_release_callback_failure_keeps_triggered() -> None:
     _qapp()
     from PySide6.QtWidgets import QWidget
 
-    from spot_operator.ui.common.estop_floating import EstopFloating
+    from blondi.ui.common.estop_floating import EstopFloating
 
     def bad_release() -> None:
         raise RuntimeError("network lost")

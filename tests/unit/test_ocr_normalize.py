@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from spot_operator.ocr.reader import FastPlateReader, _normalize_plate
+from blondi.ocr.reader import FastPlateReader, _normalize_plate
 
 
 def test_normalize_removes_non_alnum():

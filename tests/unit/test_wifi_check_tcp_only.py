@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from spot_operator.services.spot_wifi import WifiCheckResult
+from blondi.services.spot_wifi import WifiCheckResult
 
 
 def test_ok_true_when_tcp_reachable() -> None:

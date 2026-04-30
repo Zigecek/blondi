@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from spot_operator.db.repositories.plates_repo import normalize_plate_text
+from blondi.db.repositories.plates_repo import normalize_plate_text
 
 
 def test_normalize_removes_spaces_and_dashes():

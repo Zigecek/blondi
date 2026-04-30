@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from spot_operator.robot.power_state import is_motors_powered, wait_until_powered_off
+from blondi.robot.power_state import is_motors_powered, wait_until_powered_off
 
 
 def test_wait_until_powered_off_returns_true_when_already_off() -> None:

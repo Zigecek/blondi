@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from spot_operator.constants import (
+from blondi.constants import (
     CAMERA_FRONT_LEFT,
     CAMERA_FRONT_RIGHT,
     CAMERA_LEFT,

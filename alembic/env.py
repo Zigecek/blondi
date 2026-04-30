@@ -7,7 +7,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-# Make spot_operator importable even when Alembic runs directly.
+# Make blondi importable even when Alembic runs directly.
 import sys
 from pathlib import Path
 
@@ -15,7 +15,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from spot_operator.db.models import Base  # noqa: E402
+from blondi.db.models import Base  # noqa: E402
 
 config = context.config
 

@@ -1,4 +1,4 @@
-"""Entry point — Spot Operator desktop aplikace.
+"""Entry point — Blondi desktop aplikace.
 
 Pořadí startu je fixní (viz plán):
   1) bootstrap.inject_paths    -> autonomy/ + ocr/ na sys.path
@@ -19,13 +19,13 @@ import sys
 from pathlib import Path
 
 # KROK 1 — sys.path. Nesmí být NIC importováno z autonomy/ocr před tímhle.
-from spot_operator.bootstrap import inject_paths  # noqa: E402
+from blondi.bootstrap import inject_paths  # noqa: E402
 
 inject_paths()
 
 # Teprve teď můžeme importovat cokoliv z autonomy/ocr.
-from spot_operator.config import AppConfig  # noqa: E402
-from spot_operator.logging_config import dump_environment_diagnostics, get_logger, setup  # noqa: E402
+from blondi.config import AppConfig  # noqa: E402
+from blondi.logging_config import dump_environment_diagnostics, get_logger, setup  # noqa: E402
 
 
 def _single_instance_lock(config: AppConfig):
@@ -35,7 +35,7 @@ def _single_instance_lock(config: AppConfig):
     lock soubor a není blokovaný. Jméno souboru obsahuje `getpass.getuser()`
     pro izolaci.
 
-    PR-11 FIND-175: lock je v %LOCALAPPDATA%/spot_operator/ místo
+    PR-11 FIND-175: lock je v %LOCALAPPDATA%/blondi/ místo
     temp_root, aby ho nevyčistil ``cleanup_temp_root`` nebo user mazáním
     temp složky.
     """
@@ -49,19 +49,19 @@ def _single_instance_lock(config: AppConfig):
     # Sanitizuj user jméno pro filesystem (žádné \\, /, :, ...).
     safe_user = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in user)
 
-    lockdir = Path(os.getenv("LOCALAPPDATA") or config.temp_root) / "spot_operator"
+    lockdir = Path(os.getenv("LOCALAPPDATA") or config.temp_root) / "blondi"
     try:
         lockdir.mkdir(parents=True, exist_ok=True)
     except Exception:
         lockdir = config.temp_root
         lockdir.mkdir(parents=True, exist_ok=True)
-    lock_path = lockdir / f"spot_operator_{safe_user}.lock"
+    lock_path = lockdir / f"blondi_{safe_user}.lock"
 
     lock = QLockFile(str(lock_path))
     lock.setStaleLockTime(10_000)  # 10 s — předchozí crash
     if not lock.tryLock(100):
         raise RuntimeError(
-            f"Another instance of Spot Operator is already running for user "
+            f"Another instance of Blondi is already running for user "
             f"{user!r} (lock file {lock_path})."
         )
     return lock
@@ -71,7 +71,7 @@ def main() -> int:
     # PR-11 FIND-196: Python version guard.
     if sys.version_info[:2] != (3, 10):
         _fatal_dialog(
-            f"Spot Operator vyžaduje Python 3.10 (bosdyn SDK nepodporuje novější). "
+            f"Blondi vyžaduje Python 3.10 (bosdyn SDK nepodporuje novější). "
             f"Aktuální verze: {sys.version_info.major}.{sys.version_info.minor}. "
             f"Reinstaluj .venv s Pythonem 3.10 (setup_venv.bat)."
         )
@@ -89,7 +89,7 @@ def main() -> int:
         dump_environment_diagnostics(log)
         return 0
 
-    log.info("Spot Operator starting (root=%s)", config.root_dir)
+    log.info("Blondi starting (root=%s)", config.root_dir)
 
     try:
         lock = _single_instance_lock(config)
@@ -99,8 +99,8 @@ def main() -> int:
         return 1
 
     try:
-        from spot_operator.db import init_engine, ping, shutdown_engine
-        from spot_operator.db.migrations import upgrade_to_head
+        from blondi.db import init_engine, ping, shutdown_engine
+        from blondi.db.migrations import upgrade_to_head
 
         log.info("Running DB migrations...")
         upgrade_to_head(config.database_url)
@@ -119,7 +119,7 @@ def main() -> int:
 
     # Cleanup starých temp map extrakcí
     try:
-        from spot_operator.services.map_storage import cleanup_temp_root
+        from blondi.services.map_storage import cleanup_temp_root
 
         cleanup_temp_root(config.temp_root)
     except Exception as exc:
@@ -130,15 +130,15 @@ def main() -> int:
     from PySide6.QtWidgets import QApplication
 
     app = QApplication(sys.argv)
-    app.setApplicationName("Spot Operator")
-    app.setOrganizationName("spot_operator")
+    app.setApplicationName("Blondi")
+    app.setOrganizationName("blondi")
     app.setStyle("Fusion")
 
     # OCR worker
     ocr_worker = None
     try:
-        from spot_operator.ocr.pipeline import create_default_pipeline
-        from spot_operator.services.ocr_worker import OcrWorker
+        from blondi.ocr.pipeline import create_default_pipeline
+        from blondi.services.ocr_worker import OcrWorker
 
         pipeline = create_default_pipeline(config)
         ocr_worker = OcrWorker(pipeline)
@@ -149,7 +149,7 @@ def main() -> int:
 
     exit_code = 1
     try:
-        from spot_operator.ui.main_window import MainWindow
+        from blondi.ui.main_window import MainWindow
 
         window = MainWindow(config, ocr_worker=ocr_worker)
         window.showMaximized()
@@ -163,7 +163,7 @@ def main() -> int:
             ocr_worker.wait(30000)
         shutdown_engine()
         lock.unlock()
-        log.info("Spot Operator exited (code=%s)", exit_code)
+        log.info("Blondi exited (code=%s)", exit_code)
 
     return int(exit_code)
 
@@ -184,7 +184,7 @@ def _fatal_dialog(message: str) -> None:
             ephemeral = QApplication(sys.argv)
         box = QMessageBox()
         box.setIcon(QMessageBox.Critical)
-        box.setWindowTitle("Spot Operator — fatální chyba")
+        box.setWindowTitle("Blondi — fatální chyba")
         box.setText(message)
         box.exec()
         if ephemeral is not None:

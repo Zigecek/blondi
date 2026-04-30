@@ -8,11 +8,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Bootstrap — musí být PŘED importem spot_operator.
+# Bootstrap — musí být PŘED importem blondi.
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from spot_operator.bootstrap import inject_paths  # noqa: E402
+from blondi.bootstrap import inject_paths  # noqa: E402
 
 inject_paths()
 

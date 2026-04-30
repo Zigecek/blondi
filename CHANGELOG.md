@@ -179,7 +179,7 @@ Nová UX feature: photo confirm overlay. Breaking change ve shortcutech
 
 ### Added
 
-- **`PhotoConfirmOverlay`** (`spot_operator/ui/common/photo_confirm_overlay.py`)
+- **`PhotoConfirmOverlay`** (`blondi/ui/common/photo_confirm_overlay.py`)
   — non-modal widget zobrazený po kliknutí "Foto vlevo/vpravo/obě" v
   TeleopRecordPage. Ukazuje **live video** z dotyčných kamer (1 nebo 2
   pod sebou), operátor vizuálně ověří SPZ a potvrdí uložení tlačítkem
@@ -211,7 +211,7 @@ Nová UX feature: photo confirm overlay. Breaking change ve shortcutech
   jiného klienta), aplikace **automaticky** zavolá
   `PowerManager.power_off()` a retry `estop.start()`. Dříve se aplikace
   zasekla s warning v logu + `LeaseUseError` spam a operátor musel
-  restartovat celý spot_operator.
+  restartovat celý blondi.
 - `TeleopRecordPage._teardown` nyní zavře overlay pokud existuje
   (prevence thread leaku při zavření wizardu uprostřed preview).
 
@@ -336,7 +336,7 @@ change ve wizardu** (recording 6 → 5 kroků; volba strany focení per-checkpoi
 
 ### Removed
 
-- **`spot_operator/ui/wizards/pages/recording_side_page.py`** — smazán, funkce
+- **`blondi/ui/wizards/pages/recording_side_page.py`** — smazán, funkce
   nahrazena per-checkpoint tlačítky v TeleopRecordPage.
 
 ### Added
@@ -345,7 +345,7 @@ change ve wizardu** (recording 6 → 5 kroků; volba strany focení per-checkpoi
   asserty pro `MoveCommandDispatcher.send_velocity` / `.stop` / `.shutdown`,
   a `assert not hasattr(MoveCommandDispatcher, "start")` aby se detekovalo,
   kdyby autonomy v budoucnu zavedla `.start()` metodu (mělo by to vyvolat
-  review v spot_operatoru).
+  review v blondi).
 
 ## [1.1.1] — 2026-04-22
 
@@ -406,7 +406,7 @@ thread leaků, bez křehkých callsite, s live OCR feedbackem.
 ### Changed
 
 - **Per-user single-instance lock** — `main.py::_single_instance_lock` nyní
-  obsahuje `getpass.getuser()` v jméně lock souboru (`spot_operator_<user>.lock`),
+  obsahuje `getpass.getuser()` v jméně lock souboru (`blondi_<user>.lock`),
   takže více Windows uživatelů se neblokuje.
 - **`SaveMapPage._start_save`** — přestal iterovat přes `wizard().pageIds()` a
   hledat `TeleopRecordPage`. Nyní používá

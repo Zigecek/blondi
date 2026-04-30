@@ -1,4 +1,4 @@
-# Spot Operator
+# Blondi
 
 Desktop aplikace pro operátora parkoviště, která **sjednocuje nahrávání map**,
 **autonomní průjezd s focením SPZ** a **CRUD registr SPZ** — všechno proti
@@ -121,7 +121,7 @@ jsou 3 velká tlačítka:
 
 - **Spustit jízdu podle mapy** (playback wizard)
 - **Nahrát novou mapu** (recording wizard)
-- **Správa SPZ a běhů** (CRUD — zobrazí se jen pokud je složka `spot_operator/ui/crud/` nainstalovaná)
+- **Správa SPZ a běhů** (CRUD — zobrazí se jen pokud je složka `blondi/ui/crud/` nainstalovaná)
 
 ---
 
@@ -193,7 +193,7 @@ ZIP obsahuje:
 - **Return home** vyžaduje stále-validní lokalizaci. Pokud se Spot úplně ztratí, vrátit se sám nedokáže; použij E-STOP a dojdi k němu fyzicky.
 - **Nomeroff fallback** běží v subprocesu (kvůli izolaci torch/protobuf) — má cold-start ~3–5 s, takže Re-OCR v CRUD není instantní.
 - **Mapy v `BYTEA`** — typicky 1–20 MB. Pro velké areály (> 100 MB) zvaž externí storage.
-- **CRUD modul je dev-only** — v prod ho smaž (`spot_operator/ui/crud/`), tlačítko zmizí.
+- **CRUD modul je dev-only** — v prod ho smaž (`blondi/ui/crud/`), tlačítko zmizí.
 
 ---
 
@@ -268,7 +268,7 @@ Zkontroluj:
 ### OCR výsledky jsou prázdné
 
 - Ověř, že YOLO model je na cestě `ocr/license-plate-finetune-v1m.pt`.
-- Koukni do `logs/spot_operator.log` — pokud worker nespustil, uvidíš důvod.
+- Koukni do `logs/blondi.log` — pokud worker nespustil, uvidíš důvod.
 - Zkus Re-OCR fallbackem (Nomeroff) v CRUD → Fotky → detail.
 
 ### Diagnostika
@@ -294,7 +294,7 @@ c:\Users\user\spot\
 ├── alembic.ini + alembic/       # DB migrace
 ├── logs/                         # rotující log
 ├── temp/                         # dočasné extract map (čistí se při startu)
-├── spot_operator/                # hlavní Python balíček
+├── blondi/                # hlavní Python balíček
 │   ├── bootstrap.py              # sys.path injection
 │   ├── config.py, logging_config.py, constants.py
 │   ├── db/                       # SQLAlchemy + Alembic + repositories

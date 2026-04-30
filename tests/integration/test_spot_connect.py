@@ -21,7 +21,7 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_connect_and_disconnect():
-    from spot_operator.robot.session_factory import connect
+    from blondi.robot.session_factory import connect
 
     host = os.environ["SPOT_IP"]
     user = os.environ["SPOT_USERNAME"]

@@ -1,5 +1,5 @@
 @echo off
-REM Vytvori virtualni prostredi a nainstaluje zavislosti projektu spot_operator.
+REM Vytvori virtualni prostredi a nainstaluje zavislosti projektu blondi.
 REM Vyzaduje Python 3.10 nainstalovany (py -3.10 --version).
 
 where py >nul 2>&1

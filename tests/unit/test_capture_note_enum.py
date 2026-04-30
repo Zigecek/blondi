@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from spot_operator.services.contracts import CaptureFailedError, CaptureNote
+from blondi.services.contracts import CaptureFailedError, CaptureNote
 
 
 def test_capture_note_values() -> None:

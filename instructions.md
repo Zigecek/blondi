@@ -10,7 +10,7 @@ applies_to:
 document_role: core
 ---
 
-# Spot Operator — Instrukce pro AI agenta / vývojáře
+# Blondi — Instrukce pro AI agenta / vývojáře
 
 Tento dokument je **normativní** — popisuje *co a proč* se má implementovat.
 Implementační detaily (API signatury, DB schéma, code samples) jsou v
@@ -23,7 +23,7 @@ Operátorský návod (klávesy, troubleshooting, safety postupy) je v
 ## Cíl
 
 V rootu `c:\Users\zige\spot\` existuje Windows desktop Python aplikace
-(`spot_operator`), která sjednocuje dva existující podprojekty:
+(`blondi`), která sjednocuje dva existující podprojekty:
 
 - **`autonomy/`** — Spot SDK + GraphNav recording/playback + live view + E-Stop (samostatně spustitelná).
 - **`ocr/`** — YOLO detektor SPZ + OCR pipeline pro české SPZ (samostatný skript).
@@ -90,7 +90,7 @@ běží v **jednom procesu v jednom venv**.
 - **Nesmí se v nich rozbít samostatné fungování.** `cd autonomy && launch.bat` i `cd ocr && python ocrtest.py` musí dál běžet beze změny.
 - V `autonomy/` smíš dělat pouze **additive změny** — nové moduly, žádné breaking changes v API existujících souborů.
 - V `ocr/` **žádné změny**. Voláme ho přes `sys.path` a subprocess.
-- Nová aplikace je volá přes `sys.path` injekci (`spot_operator/bootstrap.py`), ne přes editable install ani kopírování.
+- Nová aplikace je volá přes `sys.path` injekci (`blondi/bootstrap.py`), ne přes editable install ani kopírování.
 
 ### 3) Mapy kompletně v DB jako ZIP
 
@@ -107,12 +107,12 @@ fast-plate-ocr a zapisuje detekce do `plate_detections`.
 
 ### 5) CRUD modul musí být fyzicky odstranitelný
 
-Celá složka `spot_operator/ui/crud/` jde smazat a aplikace dál funguje. `MainWindow`
+Celá složka `blondi/ui/crud/` jde smazat a aplikace dál funguje. `MainWindow`
 dělá:
 
 ```python
 try:
-    from spot_operator.ui.crud.crud_window import CrudWindow
+    from blondi.ui.crud.crud_window import CrudWindow
     ...
 except ImportError:
     # Tlačítko "Správa SPZ a běhů" se skryje.
@@ -128,7 +128,7 @@ tlačítky — Spustit jízdu, Nahrát mapu, Správa SPZ).
 
 ### 7) Single instance lock
 
-`QLockFile` v `temp/spot_operator.lock`. Brání druhému spuštění ve stejném user účtu.
+`QLockFile` v `temp/blondi.lock`. Brání druhému spuštění ve stejném user účtu.
 Více workerů proti stejné DB je řešeno `SELECT FOR UPDATE SKIP LOCKED`, ne single-instance lockem.
 
 ### 8) Credentials Spota v Windows Credential Locker
@@ -143,7 +143,7 @@ samotné heslo je v OS trezoru.
 1. **Nesmí editovat existující soubory** v `autonomy/` (kromě přidávání nových modulů do `autonomy/app/robot/`).
 2. **Nesmí dělat žádné změny v `ocr/`** — referujeme přes `sys.path` a subprocess.
 3. **Nesmí rozbít standalone fungování** `autonomy/` ani `ocr/`. Po každé změně musí `cd autonomy && launch.bat` nastartovat jako dřív, a `cd ocr && python ocrtest.py` běžet.
-4. **Nesmí použít balíček `app`** jako top-level — autonomy má `app/` a kolize by byla fatální. Používej `spot_operator`.
+4. **Nesmí použít balíček `app`** jako top-level — autonomy má `app/` a kolize by byla fatální. Používej `blondi`.
 5. **Nesmí ukládat mapy ani fotky na disk trvale.** Všechno perzistentní je v PG.
 6. **Nesmí instalovat** `paddlepaddle`, `tensorflow`, `mediapipe` — riziko protobuf konfliktu s `bosdyn`.
 7. **Nesmí používat blokující volání v Qt main threadu** (connect, capture, upload, navigate, OCR). Dlouhé operace v `QThread`.
@@ -240,7 +240,7 @@ fázi a **musí být vyřešena před ostrým provozem**. Kategorie podle priori
   platná. Design pause+resume by perzistoval stav průběžně a po reconnect
   pokračoval.
 - **CRUD autentizace** — aktuálně otevřené. V prod buď smazat celou složku
-  `spot_operator/ui/crud/` (design zámysl odstranitelnosti), nebo přidat
+  `blondi/ui/crud/` (design zámysl odstranitelnosti), nebo přidat
   token-based / Windows-account auth.
 - **End-to-end OCR test** — teď jen normalizace. Přidat test s reálnou fotkou
   z `ocr/test/` a ověřit, že pipeline vrací očekávanou SPZ s confidence > 0.7.
@@ -250,7 +250,7 @@ fázi a **musí být vyřešena před ostrým provozem**. Kategorie podle priori
 - **audit_log tabulka** — kdo/kdy vytvořil/smazal/upravil mapu, SPZ záznam, běh.
 - **Prometheus metriky OCR workeru** — počet zpracovaných fotek, latence,
   úspěšnost detekce, queue depth.
-- **Retention CLI job** — `python -m spot_operator.services.retention
+- **Retention CLI job** — `python -m blondi.services.retention
   --older-than 90` pro mazání starých fotek.
 - **GPU akcelerace OCR** — auto-detekce `onnxruntime-gpu` provideru podle
   dostupnosti NVIDIA CUDA.
@@ -296,9 +296,9 @@ Pokud Spot SDK začne podporovat Python 3.11+:
 
 ### Scénář: Breaking change v autonomy API
 
-Pokud autonomy upraví stabilní API, které `spot_operator` používá:
+Pokud autonomy upraví stabilní API, které `blondi` používá:
 
-1. Rozhodni: revert v autonomy NEBO update spot_operator.
+1. Rozhodni: revert v autonomy NEBO update blondi.
 2. Pokud update: upravit volající kód + aktualizovat odpovídající API signatury v `instructions-reference.md`.
 3. `CHANGELOG.md` + bump **MAJOR** verze (breaking change v reference dokumentu).
 
@@ -306,7 +306,7 @@ Pokud autonomy upraví stabilní API, které `spot_operator` používá:
 
 Pokud přibude třetí OCR engine (např. TrOCR):
 
-1. Přidat `spot_operator/ocr/<new_engine>.py`.
+1. Přidat `blondi/ocr/<new_engine>.py`.
 2. Rozšířit `constants.OCR_ENGINE_*`.
 3. `plate_detections` schéma nemění (již podporuje `engine_name`).
 4. Dokumentovat v `instructions-reference.md` sekci "OCR pipeline" + code sample.

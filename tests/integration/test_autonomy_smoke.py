@@ -6,7 +6,7 @@ Důvod: chráníme projekt před tichým selháním, kdyby:
  - naše additive moduly v `autonomy/app/robot/` (fiducial_check, return_home,
    waypoint_namer) začaly být nekonzistentní po nějakém refactoru,
  - autonomy API ztratilo `LocalizationStrategy.SPECIFIC_FIDUCIAL`, kterou používá
-   `spot_operator/services/playback_service.py`.
+   `blondi/services/playback_service.py`.
 
 Pokud test padne, neznamená to nutně chybu v autonomy — může to být chyba u nás
 (špatný import, špatná signatura). Oprav podle konkrétního assertion message.
@@ -54,7 +54,7 @@ def test_autonomy_core_api_importable() -> None:
     session = SpotSession()
     assert not session.is_connected
 
-    # Metody, které spot_operator volá, existují
+    # Metody, které blondi volá, existují
     for cls, method in (
         (SpotSession, "connect"),
         (SpotSession, "disconnect"),
@@ -84,16 +84,16 @@ def test_autonomy_core_api_importable() -> None:
     # Explicitně ověř, že autonomy v budoucnu NEZAVEDE `.start()` metodu, která by
     # tiše změnila kontrakt. Pokud by přibyla, máme chtít si o tom rozhodnout.
     assert not hasattr(MoveCommandDispatcher, "start"), (
-        "MoveCommandDispatcher.start() existuje — spot_operator ji nevolá a nemá "
+        "MoveCommandDispatcher.start() existuje — blondi ji nevolá a nemá "
         "očekávat; překontroluj session_factory.connect()."
     )
 
 
 def test_localization_strategy_enum() -> None:
-    """Enum hodnoty, které spot_operator používá, musí existovat.
+    """Enum hodnoty, které blondi používá, musí existovat.
 
     Pokud test padne, autonomy přejmenoval/odstranil enum hodnotu a
-    `spot_operator/services/playback_service.py::_localize_with_fallback` padne
+    `blondi/services/playback_service.py::_localize_with_fallback` padne
     až za runtime. Tento test to chytí build-time.
     """
     from app.models import LocalizationStrategy, NavigationOutcome
@@ -101,25 +101,25 @@ def test_localization_strategy_enum() -> None:
     # Hodnoty používané v playback_service._localize_with_fallback:
     for name in ("SPECIFIC_FIDUCIAL", "FIDUCIAL_NEAREST"):
         assert hasattr(LocalizationStrategy, name), (
-            f"LocalizationStrategy.{name} chybí — spot_operator.playback_service ho používá."
+            f"LocalizationStrategy.{name} chybí — blondi.playback_service ho používá."
         )
 
     # Hodnoty, které playback_service dispeč (REACHED, LOST, STUCK, ABORTED, TIMEOUT, ...)
     for name in ("REACHED", "LOST", "STUCK", "ABORTED", "TIMEOUT"):
         assert hasattr(NavigationOutcome, name), (
-            f"NavigationOutcome.{name} chybí — spot_operator ho používá."
+            f"NavigationOutcome.{name} chybí — blondi ho používá."
         )
 
 
-def test_spot_operator_imports_autonomy() -> None:
-    """spot_operator moduly, které používají autonomy, musí jít importovat
+def test_blondi_imports_autonomy() -> None:
+    """blondi moduly, které používají autonomy, musí jít importovat
     bez reálné DB ani Spota (jen statická analýza importů)."""
-    import spot_operator.robot.session_factory  # noqa: F401
-    import spot_operator.services.playback_service  # noqa: F401
-    import spot_operator.services.recording_service  # noqa: F401
+    import blondi.robot.session_factory  # noqa: F401
+    import blondi.services.playback_service  # noqa: F401
+    import blondi.services.recording_service  # noqa: F401
 
     # Také nepřímé volání — vyrobíme WaypointNameGenerator instanci přes
     # recording_service path, aby se ověřilo, že autonomy import v konstruktoru projde.
     # (RecordingService vyžaduje bundle, takže jen importujeme třídu.)
-    from spot_operator.services.recording_service import RecordingService
+    from blondi.services.recording_service import RecordingService
     assert RecordingService is not None

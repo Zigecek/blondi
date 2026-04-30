@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from spot_operator.constants import ROBOT_LOST_ERROR_MARKERS
+from blondi.constants import ROBOT_LOST_ERROR_MARKERS
 
 
 def _fake_result(message: str):
@@ -21,7 +21,7 @@ def _fake_result(message: str):
 
 def _get_checker():
     """Vrátí unbound `_is_robot_lost_error` na instanci; nepotřebuje bundle."""
-    from spot_operator.services.playback_service import PlaybackService
+    from blondi.services.playback_service import PlaybackService
 
     # Duck-type instance — `_is_robot_lost_error` nepoužívá self kromě signature.
     instance = PlaybackService.__new__(PlaybackService)

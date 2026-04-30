@@ -52,7 +52,7 @@ excludes = [
     "pytest",
     "PySide6",
     "bosdyn",
-    "spot_operator",
+    "blondi",
     "sqlalchemy",
     "alembic",
     "psycopg",

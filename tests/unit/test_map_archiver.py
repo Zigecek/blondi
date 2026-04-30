@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from bosdyn.api.graph_nav import map_pb2
 
-from spot_operator.services.map_archiver import (
+from blondi.services.map_archiver import (
     extract_map_archive,
     validate_map_dir,
     zip_map_dir,

@@ -1,5 +1,5 @@
 @echo off
-REM Spusti spot_operator aplikaci ve venv.
+REM Spusti blondi aplikaci ve venv.
 if not exist .venv (
   echo [CHYBA] Venv neexistuje. Spust nejdriv setup_venv.bat.
   pause
