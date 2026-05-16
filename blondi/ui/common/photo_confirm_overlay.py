@@ -72,34 +72,59 @@ class PhotoConfirmOverlay(QWidget):
         title.setTextFormat(Qt.PlainText)
         root.addWidget(title)
 
-        # Import autonomy tříd lazy (až po inject_paths) — používáme jednu
-        # sdílenou ImagePoller instanci, každá pipeline má jiný source.
-        from app.image_pipeline import ImagePipeline
-        from app.robot.images import ImagePoller
-        from app.ui.live_view_widget import LiveViewWidget
+        # Demo režim: nahradit live stream statickým placeholderem
+        # z _demo_assets/{left,right}.png. Detekce přes session._demo_available_sources
+        # (MockSession atribut) — bez závislosti na config singleton (overlay
+        # volá z teleop_record_page, kde už víme bundle).
+        is_demo = getattr(
+            getattr(bundle, "session", None), "_demo_available_sources", None
+        ) is not None
+        if is_demo:
+            from blondi.demo.live_view_stub import pixmap_for_source
 
-        poller = ImagePoller(bundle.session)  # type: ignore[attr-defined]
-        for src in self._sources:
-            lbl = QLabel(f"<b>Kamera:</b> {src}")
-            lbl.setStyleSheet("color:white; padding:2px 4px;")
-            lbl.setTextFormat(Qt.RichText)
-            root.addWidget(lbl)
+            for src in self._sources:
+                lbl = QLabel(f"<b>Kamera:</b> {src}")
+                lbl.setStyleSheet("color:white; padding:2px 4px;")
+                lbl.setTextFormat(Qt.RichText)
+                root.addWidget(lbl)
+                preview = QLabel(self)
+                preview.setMinimumHeight(360)
+                preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+                preview.setAlignment(Qt.AlignCenter)
+                preview.setPixmap(pixmap_for_source(src))
+                preview.setScaledContents(True)
+                preview.setStyleSheet("background:#000;")
+                root.addWidget(preview, stretch=1)
+                self._live_views.append(preview)
+        else:
+            # Import autonomy tříd lazy (až po inject_paths) — používáme jednu
+            # sdílenou ImagePoller instanci, každá pipeline má jiný source.
+            from app.image_pipeline import ImagePipeline
+            from app.robot.images import ImagePoller
+            from app.ui.live_view_widget import LiveViewWidget
 
-            live = LiveViewWidget(self)
-            live.setMinimumHeight(360)
-            live.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-            root.addWidget(live, stretch=1)
+            poller = ImagePoller(bundle.session)  # type: ignore[attr-defined]
+            for src in self._sources:
+                lbl = QLabel(f"<b>Kamera:</b> {src}")
+                lbl.setStyleSheet("color:white; padding:2px 4px;")
+                lbl.setTextFormat(Qt.RichText)
+                root.addWidget(lbl)
 
-            pipeline = ImagePipeline(poller)
-            pipeline.set_source(src)
-            pipeline.frame_ready.connect(live.update_frame)
-            try:
-                pipeline.start()
-            except Exception as exc:
-                _log.warning("Overlay pipeline start failed for %s: %s", src, exc)
+                live = LiveViewWidget(self)
+                live.setMinimumHeight(360)
+                live.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+                root.addWidget(live, stretch=1)
 
-            self._pipelines.append(pipeline)
-            self._live_views.append(live)
+                pipeline = ImagePipeline(poller)
+                pipeline.set_source(src)
+                pipeline.frame_ready.connect(live.update_frame)
+                try:
+                    pipeline.start()
+                except Exception as exc:
+                    _log.warning("Overlay pipeline start failed for %s: %s", src, exc)
+
+                self._pipelines.append(pipeline)
+                self._live_views.append(live)
 
         # Dvě velká tlačítka dole.
         btn_row = QHBoxLayout()

@@ -24,7 +24,7 @@ from blondi.constants import CAMERA_FRONT_COMPOSITE, UI_SIDE_PANEL_WIDTH
 from blondi.db.enums import RunStatus
 from blondi.logging_config import get_logger
 from blondi.services.map_storage import MapMetadata
-from blondi.services.playback_service import PlaybackService
+from blondi.services.playback_service import PlaybackService, create_playback_service
 from blondi.ui.common.dialogs import confirm_dialog, error_dialog
 from blondi.ui.common.estop_floating import EstopFloating
 from blondi.ui.common.workers import cleanup_worker
@@ -165,6 +165,18 @@ class PlaybackRunPage(QWizardPage):
         self._btn_stop_return.setVisible(False)
         side_layout.addWidget(self._btn_stop_return)
 
+        # Demo helper button — viditelný jen v demo módu pro stabilní screenshoty
+        # 09b (force fail). Klikne uživatel před STARTem, mock playback pak
+        # simuluje RobotLostError v půlce trasy.
+        self._btn_demo_force_fail = QPushButton("Demo: vyvolat chybu (09b)")
+        self._btn_demo_force_fail.setStyleSheet(
+            "QPushButton { background:#7b1fa2; color:white; padding:6px; font-size:11px; }"
+        )
+        self._btn_demo_force_fail.setCheckable(True)
+        self._btn_demo_force_fail.setVisible(self._config.demo_mode)
+        self._btn_demo_force_fail.toggled.connect(self._on_demo_force_fail_toggled)
+        side_layout.addWidget(self._btn_demo_force_fail)
+
         # Prostor pro floating E-Stop widget (220×70 v pravém dolním rohu)
         # aby nepřekrýval STOP tlačítko. Auto-přechod na result page po
         # dokončení jízdy (problém 1+3) — místo manuálního tlačítka spustíme
@@ -195,7 +207,7 @@ class PlaybackRunPage(QWizardPage):
         self._run_finished = False
         self._pending_return_home = False
 
-        self._service = PlaybackService(bundle)
+        self._service = create_playback_service(bundle, self._config, parent=self)
         self._wire_service_signals()
 
         from blondi.ui.common.workers import FunctionWorker
@@ -424,6 +436,14 @@ class PlaybackRunPage(QWizardPage):
             return
         wizard.next()
 
+    def _on_demo_force_fail_toggled(self, checked: bool) -> None:
+        """Demo: přepne mock playback do force-fail režimu pro screenshot 09b."""
+        if self._service is not None and hasattr(self._service, "demo_force_fail"):
+            self._service.demo_force_fail = checked
+            self._append_log(
+                f"[demo] force_fail = {checked}"
+            )
+
     def _on_obstacle_detected(self, cp_name: str, outcome: str) -> None:
         """Fix 2: Spot narazil na překážku — zeptat se operátora.
 
@@ -542,6 +562,13 @@ class PlaybackRunPage(QWizardPage):
 
     def _ensure_live_view(self, bundle) -> None:
         if self._image_pipeline is not None:
+            return
+        if self._config.demo_mode:
+            from blondi.demo.live_view_stub import compose_front_view
+
+            self._live_placeholder.setPixmap(compose_front_view())
+            self._live_placeholder.setStyleSheet("background:#000;")
+            self._live_placeholder.setScaledContents(True)
             return
         try:
             from app.image_pipeline import ImagePipeline

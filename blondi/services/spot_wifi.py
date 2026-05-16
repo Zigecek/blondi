@@ -48,6 +48,17 @@ def check_connection(
     tcp_port: int = WIFI_TCP_PORT,
 ) -> WifiCheckResult:
     """Provede ping + TCP connect a vrátí souhrnný výsledek."""
+    if _is_demo_mode():
+        result = WifiCheckResult(
+            ip=ip,
+            ping_responses=ping_count,
+            ping_attempts=ping_count,
+            tcp_reachable=True,
+            detail="demo OK",
+        )
+        _log.info("Wi-Fi check (demo): %s", result)
+        return result
+
     responses = _ping(ip, count=ping_count, timeout_s=ping_timeout_s)
     tcp_ok = _tcp_connect(ip, port=tcp_port, timeout_s=ping_timeout_s)
     result = WifiCheckResult(
@@ -59,6 +70,15 @@ def check_connection(
     )
     _log.info("Wi-Fi check: %s", result)
     return result
+
+
+def _is_demo_mode() -> bool:
+    try:
+        from blondi.config import get_active_config
+
+        return get_active_config().demo_mode
+    except Exception:
+        return False
 
 
 def _ping(ip: str, *, count: int, timeout_s: float) -> int:

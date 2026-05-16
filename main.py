@@ -117,6 +117,8 @@ def main() -> int:
         )
         return 2
 
+    # Demo seed se přesouvá až za QApplication() — QPixmap vyžaduje GUI app.
+
     # Cleanup starých temp map extrakcí
     try:
         from blondi.services.map_storage import cleanup_temp_root
@@ -133,6 +135,35 @@ def main() -> int:
     app.setApplicationName("Blondi")
     app.setOrganizationName("blondi")
     app.setStyle("Fusion")
+
+    # Demo režim: nejdřív naseed-uj DB (potřebuje QPixmap → QApplication ready),
+    # potom instaluj F12 screenshot hotkey.
+    # Lokální referenci `_demo_screenshotter` musíme držet do konce main()
+    # — bez ní by Python GC objekt sebral a event filter by se odregistroval.
+    _demo_screenshotter = None
+    if config.demo_mode:
+        try:
+            from blondi.demo.seed import seed_database
+
+            log.info("Demo mode active — seeding demo database...")
+            seed_database(config)
+        except Exception as exc:
+            log.exception("Demo seed failed: %s", exc)
+            _fatal_dialog(
+                f"Demo seed selhal:\n\n{exc}\n\n"
+                "Zkontroluj BLONDI_DEMO_DATABASE_URL a že demo DB existuje."
+            )
+            return 2
+
+        try:
+            from blondi.demo.screenshot_capture import DemoScreenshotter
+
+            _demo_screenshotter = DemoScreenshotter(
+                config.root_dir / "screens", parent=app
+            )
+            _demo_screenshotter.install(app)
+        except Exception as exc:
+            log.warning("DemoScreenshotter install failed: %s", exc)
 
     # OCR worker
     ocr_worker = None

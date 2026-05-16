@@ -106,7 +106,9 @@ class SpzTab(QWidget):
         self._model.rowsInserted.connect(self._update_status)
         root.addWidget(self._view)
 
-        self._apply_filters()
+        # Initial load — `set_filters(None, None)` by se early-returnoval
+        # (filtry se ze startu nezměnily), takže přímý reset.
+        self._model.reset()
 
     # ---- Lifecycle ----
 

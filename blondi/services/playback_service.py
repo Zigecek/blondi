@@ -993,4 +993,18 @@ class PlaybackService(QObject):
         self.progress.emit(text)
 
 
-__all__ = ["PlaybackService", "CheckpointRef"]
+def create_playback_service(bundle: Any, config: Any, parent: QObject | None = None):
+    """Factory: vrátí ``MockPlaybackService`` v demo módu, jinak ``PlaybackService``.
+
+    Volat z UI místo přímého ``PlaybackService(bundle)``. Návratový objekt má
+    identické Qt signály a public API (prepare_map, run_all_checkpoints,
+    return_home, request_abort, cleanup).
+    """
+    if getattr(config, "demo_mode", False):
+        from blondi.demo.mock_playback_service import MockPlaybackService
+
+        return MockPlaybackService(bundle, parent=parent)
+    return PlaybackService(bundle, parent=parent)
+
+
+__all__ = ["PlaybackService", "CheckpointRef", "create_playback_service"]

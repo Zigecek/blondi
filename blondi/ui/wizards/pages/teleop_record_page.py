@@ -35,7 +35,7 @@ from blondi.constants import (
 )
 from blondi.logging_config import get_logger
 from blondi.services.contracts import CaptureFailedError, validate_sources_known
-from blondi.services.recording_service import RecordingService
+from blondi.services.recording_service import RecordingService, create_recording_service
 from blondi.ui.common.dialogs import confirm_dialog, error_dialog, info_dialog
 from blondi.ui.common.estop_floating import EstopFloating
 from blondi.ui.common.photo_confirm_overlay import PhotoConfirmOverlay
@@ -244,7 +244,7 @@ class TeleopRecordPage(QWizardPage):
                 self._camera_right,
             )
 
-        self._service = RecordingService(bundle)
+        self._service = create_recording_service(bundle, wizard.config)
         fiducial_id = state.fiducial_id
         # `default_capture_sources` v DB mapě je "obě strany, které tenhle robot
         # umí" — operátor u jednotlivých checkpointů volí individuálně přes
@@ -739,6 +739,14 @@ class TeleopRecordPage(QWizardPage):
 
     def _ensure_image_pipeline(self, bundle) -> None:
         if self._image_pipeline is not None:
+            return
+        wizard = self.wizard()
+        if wizard is not None and getattr(wizard, "config", None) is not None and wizard.config.demo_mode:
+            from blondi.demo.live_view_stub import compose_front_view
+
+            self._live_placeholder.setPixmap(compose_front_view())
+            self._live_placeholder.setStyleSheet("background:#000;")
+            self._live_placeholder.setScaledContents(True)
             return
         try:
             from app.image_pipeline import ImagePipeline

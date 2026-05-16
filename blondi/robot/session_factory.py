@@ -102,6 +102,12 @@ class SpotBundle:
         )
         hostname_s: str | None = str(hostname) if hostname else None
 
+        # Demo režim: MockSession má _demo_available_sources, nepotřebujeme volat
+        # ImagePoller (ten by spadl, protože session není reálný bosdyn klient).
+        demo_sources = getattr(self.session, "_demo_available_sources", None)
+        if demo_sources is not None:
+            return BundleInfo(hostname=hostname_s, available_sources=list(demo_sources))
+
         available: list[str] = []
         try:
             from app.robot.images import ImagePoller
@@ -157,6 +163,12 @@ def connect_partial(
     pozná chybějící klienty podle `None`. PR-13 FIND-069: dead
     flags ``with_lease`` / ``with_estop`` odstraněny (nikdy se nepoužívaly).
     """
+    if _is_demo_mode():
+        from blondi.demo.mock_spot import build_mock_bundle
+
+        _log.info("Demo režim: vracím MockSpotBundle místo reálného Spot SDK připojení.")
+        return build_mock_bundle(hostname)
+
     from app.robot.sdk_session import SpotSession
 
     session = SpotSession()
@@ -273,6 +285,20 @@ def connect(
             _log.warning("connect cleanup after partial failure failed: %s", exc)
         raise
     return bundle
+
+
+def _is_demo_mode() -> bool:
+    """Tolerantní check demo módu — fallback na False pokud config není načten.
+
+    AppConfig.load_from_env() musí být zavolán dřív (z main.py); tady se
+    chráníme proti cyklickým importům a edge cases (testy bez full bootstrap).
+    """
+    try:
+        from blondi.config import get_active_config
+
+        return get_active_config().demo_mode
+    except Exception:
+        return False
 
 
 __all__ = ["SpotBundle", "BundleInfo", "connect", "connect_partial"]

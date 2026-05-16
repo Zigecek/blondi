@@ -562,4 +562,22 @@ class RecordingService:
         return list(self._checkpoints)
 
 
-__all__ = ["RecordingService", "RecordedCheckpoint", "RecordingSnapshot"]
+def create_recording_service(bundle: Any, config: Any) -> Any:
+    """Factory: vrátí ``MockRecordingService`` v demo módu, jinak ``RecordingService``.
+
+    Volat z UI místo přímého ``RecordingService(bundle)``. Návratový objekt
+    má identické API (start/add_unnamed_waypoint/capture/stop_and_export/save_snapshot_to_db/abort).
+    """
+    if getattr(config, "demo_mode", False):
+        from blondi.demo.mock_recording_service import MockRecordingService
+
+        return MockRecordingService(bundle)
+    return RecordingService(bundle)
+
+
+__all__ = [
+    "RecordingService",
+    "RecordedCheckpoint",
+    "RecordingSnapshot",
+    "create_recording_service",
+]

@@ -430,6 +430,16 @@ class FiducialPage(QWizardPage):
         self._check_progress.setVisible(True)
         self._status.setText("<i>Hledám fiducial...</i>")
 
+        if self._config.demo_mode:
+            # Demo: mockované observation po 800 ms (UI feedback).
+            from blondi.demo.mock_fiducial import fake_observations
+
+            QTimer.singleShot(
+                800,
+                lambda: self._on_check_done(fake_observations(self._required_id)),
+            )
+            return
+
         from app.robot.fiducial_check import visible_fiducials
 
         self._worker = FunctionWorker(
@@ -561,6 +571,13 @@ class FiducialPage(QWizardPage):
 
     def _ensure_image_pipeline(self, bundle) -> None:
         if self._image_pipeline is not None:
+            return
+        if self._config.demo_mode:
+            from blondi.demo.live_view_stub import compose_front_view
+
+            self._live_placeholder.setPixmap(compose_front_view())
+            self._live_placeholder.setStyleSheet("background:#000;")
+            self._live_placeholder.setScaledContents(True)
             return
         try:
             from app.image_pipeline import ImagePipeline

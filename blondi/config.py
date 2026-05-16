@@ -40,6 +40,7 @@ class AppConfig:
     keyring_service: str
     operator_label: str
     log_level: str
+    demo_mode: bool
 
     # Derived paths
     logs_dir: Path
@@ -54,7 +55,13 @@ class AppConfig:
         if env_file.is_file():
             load_dotenv(env_file, override=False)
 
-        database_url = _resolve_database_url()
+        demo_mode = os.environ.get("BLONDI_DEMO", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        database_url = _resolve_database_url(demo_mode=demo_mode)
         spot_default_ip = os.environ.get("SPOT_DEFAULT_IP", "192.168.80.3")
         spot_timeout_seconds = _require_float(
             "SPOT_TIMEOUT_SECONDS", "15", min_val=1.0, max_val=300.0
@@ -83,7 +90,7 @@ class AppConfig:
                 f"Povolené hodnoty: {', '.join(sorted(_VALID_LOG_LEVELS))}."
             )
 
-        return cls(
+        config = cls(
             database_url=database_url,
             spot_default_ip=spot_default_ip,
             spot_timeout_seconds=spot_timeout_seconds,
@@ -94,15 +101,47 @@ class AppConfig:
             keyring_service=keyring_service,
             operator_label=operator_label,
             log_level=log_level,
+            demo_mode=demo_mode,
             logs_dir=LOGS_DIR,
             temp_root=TEMP_ROOT,
             root_dir=ROOT,
         )
+        _set_active_config(config)
+        return config
 
     def ensure_runtime_dirs(self) -> None:
         """Vytvoří logs/ a temp/ pokud neexistují."""
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.temp_root.mkdir(parents=True, exist_ok=True)
+
+
+_CACHED_CONFIG: AppConfig | None = None
+
+
+def _set_active_config(config: AppConfig) -> None:
+    """Uloží aktivní AppConfig pro pozdější dotazy přes get_active_config().
+
+    Cache umožňuje dispatch helperům (session_factory, spot_wifi, mock services)
+    číst demo_mode flag bez nutnosti propagovat AppConfig skrz všechna API.
+    """
+    global _CACHED_CONFIG
+    _CACHED_CONFIG = config
+
+
+def get_active_config() -> AppConfig:
+    """Vrátí aktuálně načtený AppConfig. Raise pokud ještě nebyl inicializován.
+
+    Volat z dispatch helperů které potřebují vědět o demo_mode (např.
+    session_factory.connect, spot_wifi.check_connection). Hlavní entry pointy
+    (main.py) předávají config explicitně — tahle funkce je fallback pro
+    transitivně volaný kód.
+    """
+    if _CACHED_CONFIG is None:
+        raise RuntimeError(
+            "AppConfig nebyl ještě načten — zavolej AppConfig.load_from_env() "
+            "při startu aplikace."
+        )
+    return _CACHED_CONFIG
 
 
 def _require(key: str) -> str:
@@ -145,13 +184,27 @@ def _require_float(
     return value
 
 
-def _resolve_database_url() -> str:
+def _resolve_database_url(*, demo_mode: bool = False) -> str:
     """Vyřeší DATABASE_URL. PR-10 FIND-001: podpora opt-in keyring pro heslo
     (DATABASE_URL_TEMPLATE s ``{password}`` placeholder + keyring key).
 
     Kompatibilita: ``DATABASE_URL`` stále funguje jako primární cesta
     (plaintext password). Migrace: ``.env`` s template → heslo v keyringu.
+
+    Demo režim: pokud ``demo_mode=True``, **vyžaduje** explicitní
+    ``BLONDI_DEMO_DATABASE_URL`` v env. Bez něj raise s CZ chybou — chrání
+    proti omylu, kdy by demo seed přepsal produkční data.
     """
+    if demo_mode:
+        demo_url = os.environ.get("BLONDI_DEMO_DATABASE_URL", "").strip()
+        if not demo_url:
+            raise RuntimeError(
+                "Demo režim (BLONDI_DEMO=1) vyžaduje samostatnou databázi "
+                "kvůli ochraně produkčních dat. Nastav BLONDI_DEMO_DATABASE_URL "
+                "(např. v launch_demo.bat) na prázdnou demo DB. Příklad: "
+                "postgresql://blondi:heslo@localhost:5432/blondi_demo"
+            )
+        return demo_url
     template = os.environ.get("DATABASE_URL_TEMPLATE")
     keyring_key = os.environ.get("DATABASE_PASSWORD_KEYRING_KEY")
     if template and keyring_key:
